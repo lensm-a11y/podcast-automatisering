@@ -28,12 +28,12 @@ from googleapiclient.http import MediaFileUpload
 
 FEEDS = [
     # Voeg hier je podcasts toe: korte naam (voor de bestandsnaam) + RSS-URL
-    {"naam": "ADVoetbalpodcast", "rss_url": "VUL_HIER_DE_RSS_URL_IN"},
+    {"naam": "ADVoetbalpodcast", "rss_url": "https://www.omnycontent.com/d/playlist/33dbd2dc-d464-471d-9feb-abae00330078/6b7fd3a5-faa4-49d7-8618-abae007e950b/176c1b6c-c144-48c0-9b70-abae007e950b/podcast.rss"},
     # {"naam": "GeldEnMacht", "rss_url": "https://..."},
 ]
 
-INBOX_FOLDER_ID = "VUL_HIER_IN"          # ID uit de Drive-URL van je Inbox-map
-SERVICE_ACCOUNT_JSON = "service_account.json"  # pad naar het gedownloade sleutelbestand
+INBOX_FOLDER_ID = "1Sqia5kivNsQgxXbNzBHLNMzE3RJMxwB0"   # ID uit de Drive-URL van je Inbox-map
+SERVICE_ACCOUNT_JSON = "service_account.json"  # pad naar het gedownloade sleutelbestand (alleen gebruikt bij lokaal draaien)
 WHISPER_MODEL_GROOTTE = "small"           # tiny/base/small/medium/large-v3
 STATE_BESTAND = "verwerkte_afleveringen.json"
 TIJDELIJKE_AUDIO_MAP = Path("tmp_audio")
