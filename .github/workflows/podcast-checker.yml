@@ -1,0 +1,35 @@
+name: Podcast checker
+
+on:
+  schedule:
+    - cron: '0 16 * * *'   # 16:00 UTC = 18:00 Nederlandse tijd (zomertijd, CEST) — zie toelichting over wintertijd
+  workflow_dispatch:        # hiermee kun je 'm ook handmatig starten vanuit de Actions-tab
+
+jobs:
+  check-podcasts:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Repository ophalen
+        uses: actions/checkout@v4
+
+      - name: Python installeren
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'   # scheelt 30-60s per run na de eerste keer
+
+      - name: Dependencies installeren
+        run: pip install -r requirements.txt
+
+      - name: Script draaien
+        env:
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+        run: python podcast_automatisering.py
+
+      - name: Bijgewerkte lijst met verwerkte afleveringen terugschrijven
+        run: |
+          git config user.name "podcast-bot"
+          git config user.email "podcast-bot@users.noreply.github.com"
+          git add verwerkte_afleveringen.json
+          git diff --staged --quiet || git commit -m "Update verwerkte afleveringen"
+          git push
