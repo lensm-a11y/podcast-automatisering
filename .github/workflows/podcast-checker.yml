@@ -33,6 +33,10 @@ jobs:
         run: |
           git config user.name "podcast-bot"
           git config user.email "podcast-bot@users.noreply.github.com"
-          git add verwerkte_afleveringen.json
-          git diff --staged --quiet || git commit -m "Update verwerkte afleveringen"
-          git push
+          if [ -f verwerkte_afleveringen.json ]; then
+            git add verwerkte_afleveringen.json
+            git diff --staged --quiet || git commit -m "Update verwerkte afleveringen"
+            git push
+          else
+            echo "verwerkte_afleveringen.json bestaat nog niet — niets om te committen (geen enkele upload gelukt deze run)."
+          fi
