@@ -1,5 +1,8 @@
 name: Podcast checker
 
+permissions:
+  contents: write   # nodig om verwerkte_afleveringen.json terug te committen naar de repo
+
 on:
   schedule:
     - cron: '0 16 * * *'   # 16:00 UTC = 18:00 Nederlandse tijd (zomertijd, CEST) — zie toelichting over wintertijd
