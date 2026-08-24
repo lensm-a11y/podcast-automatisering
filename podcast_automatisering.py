@@ -148,7 +148,13 @@ def transcribeer(audio_pad):
     )
     return " ".join(segment.text.strip() for segment in segments)
 
+_whisperx_model = None
+_align_model = None
+_align_metadata = None
+_diarize_model = None
+
 def transcribeer_met_sprekers(audio_pad):
+    global _whisperx_model, _align_model, _align_metadata, _diarize_model
     import os
     import whisperx
 
@@ -160,18 +166,21 @@ def transcribeer_met_sprekers(audio_pad):
         return " ".join(s.text.strip() for s in segments)
 
     device = "cpu"
-    print("WhisperX-model laden voor transcriptie + uitlijning...")
-    model = whisperx.load_model(WHISPER_MODEL_GROOTTE, device, compute_type="int8", language="nl")
+    if _whisperx_model is None:
+        print("WhisperX-model laden voor transcriptie + uitlijning (eenmalig per run)...")
+        _whisperx_model = whisperx.load_model(WHISPER_MODEL_GROOTTE, device, compute_type="int8", language="nl")
     audio = whisperx.load_audio(str(audio_pad))
-    result = model.transcribe(audio, batch_size=8, language="nl")
+    result = _whisperx_model.transcribe(audio, batch_size=8, language="nl")
 
     print("Woorden uitlijnen...")
-    model_a, metadata = whisperx.load_align_model(language_code="nl", device=device)
-    result = whisperx.align(result["segments"], model_a, metadata, audio, device, return_char_alignments=False)
+    if _align_model is None:
+        _align_model, _align_metadata = whisperx.load_align_model(language_code="nl", device=device)
+    result = whisperx.align(result["segments"], _align_model, _align_metadata, audio, device, return_char_alignments=False)
 
     print("Sprekers herkennen (diarization)...")
-    diarize_model = whisperx.diarize.DiarizationPipeline(use_auth_token=hf_token, device=device)
-    diarize_segments = diarize_model(audio)
+    if _diarize_model is None:
+        _diarize_model = whisperx.diarize.DiarizationPipeline(token=hf_token, device=device)
+    diarize_segments = _diarize_model(audio)
     result = whisperx.assign_word_speakers(diarize_segments, result)
 
     regels = []
@@ -249,7 +258,8 @@ def main():
 
         for aflevering in nieuwe:
             print(f"[{naam}] nieuwe aflevering gevonden: {aflevering['titel']}")
-            audio_pad = TIJDELIJKE_AUDIO_MAP / f"{naam}_{aflevering['id'][:8]}.mp3"
+            veilig_id = re.sub(r"[^A-Za-z0-9]", "", aflevering["id"])[:12]
+            audio_pad = TIJDELIJKE_AUDIO_MAP / f"{naam}_{veilig_id}.mp3"
 
             try:
                 download_audio(aflevering["audio_url"], audio_pad)
