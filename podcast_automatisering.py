@@ -109,7 +109,10 @@ def vind_nieuwe_afleveringen(feed_url, al_verwerkt):
 
 def download_audio(url, doelpad):
     TIJDELIJKE_AUDIO_MAP.mkdir(exist_ok=True)
-    with requests.get(url, stream=True, timeout=60) as r:
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
+    }
+    with requests.get(url, stream=True, timeout=60, headers=headers) as r:
         r.raise_for_status()
         with open(doelpad, "wb") as f:
             for chunk in r.iter_content(chunk_size=8192):
