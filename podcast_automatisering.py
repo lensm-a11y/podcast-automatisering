@@ -44,6 +44,7 @@ STATE_BESTAND = "verwerkte_afleveringen.json"
 TIJDELIJKE_AUDIO_MAP = Path("tmp_audio")
 MAX_AFLEVERING_LEEFTIJD_DAGEN = 60  # TIJDELIJK ruim gezet voor de eerste testronde — zet dit terug naar bv. 7 zodra alles werkt
 ALLEEN_LAATSTE_AFLEVERING = True    # True = per feed maximaal 1 (de meest recente) nieuwe aflevering per run verwerken
+ENABLE_DIARIZATION = True           # True = sprekers labelen (SPEAKER_00, etc.) via WhisperX+pyannote, trager dan zonder
 SERVICE_ACCOUNT_JSON = "service_account.json"  # alleen gebruikt als fallback bij een Shared Drive/Workspace-account, zie get_drive_service()
 
 # ===== STATE: welke afleveringen zijn al verwerkt =====
@@ -131,6 +132,9 @@ def get_whisper_model():
     return _model
 
 def transcribeer(audio_pad):
+    if ENABLE_DIARIZATION:
+        return transcribeer_met_sprekers(audio_pad)
+
     model = get_whisper_model()
     segments, _info = model.transcribe(
         str(audio_pad),
@@ -139,6 +143,40 @@ def transcribeer(audio_pad):
         vad_filter=WHISPER_VAD_FILTER
     )
     return " ".join(segment.text.strip() for segment in segments)
+
+def transcribeer_met_sprekers(audio_pad):
+    import os
+    import whisperx
+
+    hf_token = os.environ.get("HF_TOKEN")
+    if not hf_token:
+        print("WAARSCHUWING: HF_TOKEN ontbreekt, diarization overgeslagen voor deze aflevering (terugval op tekst zonder sprekerlabels).")
+        model = get_whisper_model()
+        segments, _ = model.transcribe(str(audio_pad), language="nl", beam_size=WHISPER_BEAM_SIZE, vad_filter=WHISPER_VAD_FILTER)
+        return " ".join(s.text.strip() for s in segments)
+
+    device = "cpu"
+    print("WhisperX-model laden voor transcriptie + uitlijning...")
+    model = whisperx.load_model(WHISPER_MODEL_GROOTTE, device, compute_type="int8", language="nl")
+    audio = whisperx.load_audio(str(audio_pad))
+    result = model.transcribe(audio, batch_size=8, language="nl")
+
+    print("Woorden uitlijnen...")
+    model_a, metadata = whisperx.load_align_model(language_code="nl", device=device)
+    result = whisperx.align(result["segments"], model_a, metadata, audio, device, return_char_alignments=False)
+
+    print("Sprekers herkennen (diarization)...")
+    diarize_model = whisperx.diarize.DiarizationPipeline(use_auth_token=hf_token, device=device)
+    diarize_segments = diarize_model(audio)
+    result = whisperx.assign_word_speakers(diarize_segments, result)
+
+    regels = []
+    for seg in result["segments"]:
+        spreker = seg.get("speaker", "Onbekende spreker")
+        tekst = seg.get("text", "").strip()
+        if tekst:
+            regels.append(f"{spreker}: {tekst}")
+    return "\n".join(regels)
 
 # ===== Drive: uploaden naar Inbox =====
 
