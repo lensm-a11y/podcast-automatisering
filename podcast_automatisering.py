@@ -33,6 +33,7 @@ FEEDS = [
     {"naam": "KickOffTelegraaf", "rss_url": "https://www.omnycontent.com/d/playlist/fdd7ab40-270d-4a1e-a257-acd200da1324/f12b3a33-c5e5-4921-bb11-ae030151489d/244539d5-19fe-4548-a2dd-ae03015148c2/podcast.rss"},
     {"naam": "AZPodcastNHD", "rss_url": "https://www.omnycontent.com/d/playlist/fdd7ab40-270d-4a1e-a257-acd200da1324/d8f71e1d-5ad9-4428-b9bf-b441006d81f1/803738c5-fe14-4e7c-8915-b441006d8206/podcast.rss"},
     {"naam": "VandaagInside", "rss_url": "https://www.omnycontent.com/d/playlist/56ccbbb7-0ff7-4482-9d99-a88800f49f6c/7f3260de-b7ab-4b6d-818a-a96800ba1862/4d7e974e-719e-45f4-84fe-a96800bc8ad7/podcast.rss"},
+    {"naam": "RondoZiggoSport", "rss_url": "https://app.springcast.fm/podcast-xml/17447"},
 ]
 
 INBOX_FOLDER_ID = "1Sqia5kivNsQgxXbNzBHLNMzE3RJMxwB0"   # ID uit de Drive-URL van je Inbox-map
