@@ -48,6 +48,41 @@ ALLEEN_LAATSTE_AFLEVERING = True    # True = per feed maximaal 1 (de meest recen
 ENABLE_DIARIZATION = True           # True = sprekers labelen (SPEAKER_00, etc.) via WhisperX+pyannote, trager dan zonder
 SERVICE_ACCOUNT_JSON = "service_account.json"  # alleen gebruikt als fallback bij een Shared Drive/Workspace-account, zie get_drive_service()
 
+import threading
+
+class Hartslag:
+    """Print elke paar minuten een teken van leven tijdens lange, stille stappen,
+    zodat de run niet als 'hangend' wordt beschouwd bij langdurige stilte in de output."""
+    def __init__(self, label, interval_seconden=180):
+        self.label = label
+        self.interval = interval_seconden
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._loop, daemon=True)
+
+    def _loop(self):
+        while not self._stop.wait(self.interval):
+            print(f"... {self.label} nog bezig, geen zorgen ...")
+
+    def __enter__(self):
+        self._thread.start()
+        return self
+
+    def __exit__(self, *args):
+        self._stop.set()
+
+# ===== Hulpfunctie: automatisch opnieuw proberen bij tijdelijke netwerk-/SSL-haperingen =====
+
+def laad_met_retry(functie, pogingen=3, wachttijd_seconden=15):
+    laatste_fout = None
+    for poging in range(1, pogingen + 1):
+        try:
+            return functie()
+        except Exception as e:
+            laatste_fout = e
+            print(f"Poging {poging}/{pogingen} mislukt ({e}), {wachttijd_seconden}s wachten en opnieuw proberen...")
+            time.sleep(wachttijd_seconden)
+    raise laatste_fout
+
 # ===== STATE: welke afleveringen zijn al verwerkt =====
 
 def laad_state():
@@ -175,12 +210,14 @@ def transcribeer_met_sprekers(audio_pad):
     print("Woorden uitlijnen...")
     if _align_model is None:
         _align_model, _align_metadata = whisperx.load_align_model(language_code="nl", device=device)
-    result = whisperx.align(result["segments"], _align_model, _align_metadata, audio, device, return_char_alignments=False)
+    with Hartslag("Woorden uitlijnen"):
+        result = whisperx.align(result["segments"], _align_model, _align_metadata, audio, device, return_char_alignments=False)
 
     print("Sprekers herkennen (diarization)...")
     if _diarize_model is None:
-        _diarize_model = whisperx.diarize.DiarizationPipeline(token=hf_token, device=device)
-    diarize_segments = _diarize_model(audio)
+        _diarize_model = laad_met_retry(lambda: whisperx.diarize.DiarizationPipeline(token=hf_token, device=device))
+    with Hartslag("Sprekers herkennen"):
+        diarize_segments = laad_met_retry(lambda: _diarize_model(audio))
     result = whisperx.assign_word_speakers(diarize_segments, result)
 
     regels = []
@@ -262,7 +299,7 @@ def main():
             audio_pad = TIJDELIJKE_AUDIO_MAP / f"{naam}_{veilig_id}.mp3"
 
             try:
-                download_audio(aflevering["audio_url"], audio_pad)
+                laad_met_retry(lambda: download_audio(aflevering["audio_url"], audio_pad))
                 tekst = transcribeer(audio_pad)
                 bestandsnaam = maak_bestandsnaam(naam, aflevering["datum"])
                 upload_naar_drive(drive, tekst, bestandsnaam)
