@@ -214,9 +214,16 @@ def transcribeer_met_sprekers(audio_pad):
     device = "cpu"
     if _whisperx_model is None:
         print("WhisperX-model laden voor transcriptie + uitlijning (eenmalig per run)...")
-        _whisperx_model = whisperx.load_model(WHISPER_MODEL_GROOTTE, device, compute_type="int8", language="nl")
+        _whisperx_model = whisperx.load_model(
+            WHISPER_MODEL_GROOTTE,
+            device,
+            compute_type="int8",
+            language="nl",
+            threads=WHISPER_CPU_THREADS,
+            asr_options={"initial_prompt": WHISPER_INITIAL_PROMPT}
+        )
     audio = whisperx.load_audio(str(audio_pad))
-    result = _whisperx_model.transcribe(audio, batch_size=8, language="nl", initial_prompt=WHISPER_INITIAL_PROMPT)
+    result = _whisperx_model.transcribe(audio, batch_size=8, language="nl")
 
     print("Woorden uitlijnen...")
     if _align_model is None:
