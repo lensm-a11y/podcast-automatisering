@@ -1,7 +1,7 @@
 name: Podcast checker
 
 permissions:
-  contents: write   # nodig om verwerkte_afleveringen.json terug te committen naar de repo
+  contents: write   # nodig om de state-bestanden terug te committen naar de repo
 
 on:
   schedule:
@@ -11,6 +11,17 @@ on:
 jobs:
   check-podcasts:
     runs-on: ubuntu-latest
+    timeout-minutes: 350   # per podcast (elke feed draait in een eigen, parallelle taak)
+    strategy:
+      fail-fast: false     # als 1 podcast faalt, laat de andere gewoon doorlopen
+      matrix:
+        feed:
+          - ADVoetbalpodcast
+          - NOSVoetbalpodcast
+          - KickOffTelegraaf
+          - AZPodcastNHD
+          - VandaagInside
+          - RondoZiggoSport
     steps:
       - name: Repository ophalen
         uses: actions/checkout@v4
@@ -27,23 +38,37 @@ jobs:
       - name: ffmpeg installeren
         run: sudo apt-get update && sudo apt-get install -y ffmpeg
 
-      - name: Script draaien
+      - name: Script draaien voor ${{ matrix.feed }}
         env:
           OAUTH_CLIENT_ID: ${{ secrets.OAUTH_CLIENT_ID }}
           OAUTH_CLIENT_SECRET: ${{ secrets.OAUTH_CLIENT_SECRET }}
           OAUTH_REFRESH_TOKEN: ${{ secrets.OAUTH_REFRESH_TOKEN }}
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           PYTHONUNBUFFERED: "1"   # zorgt dat print()-regels meteen zichtbaar zijn in de log, i.p.v. pas aan het eind
-        run: python podcast_automatisering.py
+        run: python podcast_automatisering.py "${{ matrix.feed }}"
 
-      - name: Bijgewerkte lijst met verwerkte afleveringen terugschrijven
+      - name: State-bestand van ${{ matrix.feed }} terugschrijven
         run: |
           git config user.name "podcast-bot"
           git config user.email "podcast-bot@users.noreply.github.com"
-          if [ -f verwerkte_afleveringen.json ]; then
-            git add verwerkte_afleveringen.json
-            git diff --staged --quiet || git commit -m "Update verwerkte afleveringen"
-            git push
+          BESTAND="verwerkte_${{ matrix.feed }}.json"
+          if [ -f "$BESTAND" ]; then
+            for poging in 1 2 3 4 5; do
+              git add "$BESTAND"
+              if git diff --staged --quiet; then
+                echo "Niets nieuws te committen voor $BESTAND."
+                break
+              fi
+              git commit -m "Update $BESTAND"
+              git pull --rebase origin main
+              if git push; then
+                echo "Gelukt op poging $poging."
+                break
+              else
+                echo "Push mislukt (waarschijnlijk gelijktijdig met een andere podcast-taak), poging $poging/5, probeer opnieuw..."
+                sleep $((RANDOM % 10 + 5))
+              fi
+            done
           else
-            echo "verwerkte_afleveringen.json bestaat nog niet — niets om te committen (geen enkele upload gelukt deze run)."
+            echo "$BESTAND bestaat nog niet — niets om te committen (geen enkele upload gelukt deze run)."
           fi
