@@ -37,11 +37,21 @@ FEEDS = [
 ]
 
 INBOX_FOLDER_ID = "1Sqia5kivNsQgxXbNzBHLNMzE3RJMxwB0"   # ID uit de Drive-URL van je Inbox-map
-WHISPER_MODEL_GROOTTE = "small"           # tiny/base/small/medium/large-v3
+WHISPER_MODEL_GROOTTE = "large-v3"        # zwaarste, meest nauwkeurige model — kwaliteit boven snelheid
+WHISPER_INITIAL_PROMPT = (
+    "Dit is een Nederlandstalige voetbalpodcast. Er wordt gesproken over wedstrijden, "
+    "transfers, tactiek, blessures en clubnieuws. Veelgebruikte termen: elftal, aanvoerder, "
+    "scheidsrechter, buitenspel, penalty, corner, vrije trap, gele kaart, rode kaart, wissel, "
+    "basisopstelling, bank, degradatie, promotie, play-offs, Champions League, Europa League, "
+    "Eredivisie, KNVB Beker, transferwindow, huurbasis, aflossing. Clubs: Ajax, Feyenoord, PSV, "
+    "AZ, FC Twente, FC Utrecht, Vitesse, Go Ahead Eagles, NEC, Heerenveen, Sparta Rotterdam, "
+    "Fortuna Sittard, Excelsior, Heracles Almelo, RKC Waalwijk, Willem II, NAC Breda. "
+    "Posities: keeper, centrale verdediger, linksback, rechtsback, controleur, aanvallende "
+    "middenvelder, buitenspeler, spits."
+)  # helpt het model voetbal-specifieke namen, termen en context correct te herkennen
 WHISPER_CPU_THREADS = 4                   # match het aantal vCPU's van de runner (public repo = 4)
-WHISPER_BEAM_SIZE = 1                     # 1 = sneller (greedy), 5 = nauwkeuriger maar trager (standaard-Whisper-instelling)
+WHISPER_BEAM_SIZE = 5                     # verhoogd van 1 naar 5 (standaard-Whisper-instelling) — kwaliteit boven snelheid
 WHISPER_VAD_FILTER = True                 # slaat stiltes/muziek/intro's over — vaak een flinke tijdsbesparing bij podcasts
-STATE_BESTAND = "verwerkte_afleveringen.json"
 TIJDELIJKE_AUDIO_MAP = Path("tmp_audio")
 MAX_AFLEVERING_LEEFTIJD_DAGEN = 60  # TIJDELIJK ruim gezet voor de eerste testronde — zet dit terug naar bv. 7 zodra alles werkt
 ALLEEN_LAATSTE_AFLEVERING = True    # True = per feed maximaal 1 (de meest recente) nieuwe aflevering per run verwerken
@@ -85,13 +95,13 @@ def laad_met_retry(functie, pogingen=3, wachttijd_seconden=15):
 
 # ===== STATE: welke afleveringen zijn al verwerkt =====
 
-def laad_state():
-    if Path(STATE_BESTAND).exists():
-        return json.loads(Path(STATE_BESTAND).read_text())
-    return {}
+def laad_state(state_bestand):
+    if Path(state_bestand).exists():
+        return json.loads(Path(state_bestand).read_text())
+    return []
 
-def sla_state_op(state):
-    Path(STATE_BESTAND).write_text(json.dumps(state, indent=2))
+def sla_state_op(state_bestand, verwerkte_ids):
+    Path(state_bestand).write_text(json.dumps(verwerkte_ids, indent=2))
 
 # ===== RSS: nieuwe afleveringen herkennen =====
 
@@ -179,7 +189,8 @@ def transcribeer(audio_pad):
         str(audio_pad),
         language="nl",
         beam_size=WHISPER_BEAM_SIZE,
-        vad_filter=WHISPER_VAD_FILTER
+        vad_filter=WHISPER_VAD_FILTER,
+        initial_prompt=WHISPER_INITIAL_PROMPT
     )
     return " ".join(segment.text.strip() for segment in segments)
 
@@ -197,7 +208,7 @@ def transcribeer_met_sprekers(audio_pad):
     if not hf_token:
         print("WAARSCHUWING: HF_TOKEN ontbreekt, diarization overgeslagen voor deze aflevering (terugval op tekst zonder sprekerlabels).")
         model = get_whisper_model()
-        segments, _ = model.transcribe(str(audio_pad), language="nl", beam_size=WHISPER_BEAM_SIZE, vad_filter=WHISPER_VAD_FILTER)
+        segments, _ = model.transcribe(str(audio_pad), language="nl", beam_size=WHISPER_BEAM_SIZE, vad_filter=WHISPER_VAD_FILTER, initial_prompt=WHISPER_INITIAL_PROMPT)
         return " ".join(s.text.strip() for s in segments)
 
     device = "cpu"
@@ -205,7 +216,7 @@ def transcribeer_met_sprekers(audio_pad):
         print("WhisperX-model laden voor transcriptie + uitlijning (eenmalig per run)...")
         _whisperx_model = whisperx.load_model(WHISPER_MODEL_GROOTTE, device, compute_type="int8", language="nl")
     audio = whisperx.load_audio(str(audio_pad))
-    result = _whisperx_model.transcribe(audio, batch_size=8, language="nl")
+    result = _whisperx_model.transcribe(audio, batch_size=8, language="nl", initial_prompt=WHISPER_INITIAL_PROMPT)
 
     print("Woorden uitlijnen...")
     if _align_model is None:
@@ -281,12 +292,20 @@ def maak_bestandsnaam(bron_titel, datum):
 # ===== Hoofdproces =====
 
 def main():
-    state = laad_state()
-    drive = get_drive_service()
+    import sys
+    alleen_deze_feed = sys.argv[1] if len(sys.argv) > 1 else None
 
-    for feed_info in FEEDS:
+    drive = get_drive_service()
+    te_verwerken_feeds = [f for f in FEEDS if not alleen_deze_feed or f["naam"] == alleen_deze_feed]
+
+    if alleen_deze_feed and not te_verwerken_feeds:
+        print(f"FOUT: feed '{alleen_deze_feed}' niet gevonden in FEEDS.")
+        return
+
+    for feed_info in te_verwerken_feeds:
         naam = feed_info["naam"]
-        al_verwerkt = state.get(naam, [])
+        state_bestand = f"verwerkte_{naam}.json"  # eigen bestand per podcast -> geen git-conflicten bij parallelle runs
+        al_verwerkt = laad_state(state_bestand)
         nieuwe = vind_nieuwe_afleveringen(feed_info["rss_url"], al_verwerkt)
 
         if not nieuwe:
@@ -306,8 +325,7 @@ def main():
                 print(f"[{naam}] geüpload als {bestandsnaam}")
 
                 al_verwerkt.append(aflevering["id"])
-                state[naam] = al_verwerkt
-                sla_state_op(state)  # meteen opslaan, niet pas aan het eind
+                sla_state_op(state_bestand, al_verwerkt)  # meteen opslaan, niet pas aan het eind
             except Exception as e:
                 print(f"[{naam}] FOUT bij '{aflevering['titel']}': {e}")
                 # deze aflevering NIET aan verwerkt toevoegen -> volgende run opnieuw geprobeerd
