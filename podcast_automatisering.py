@@ -27,13 +27,68 @@ from googleapiclient.http import MediaFileUpload
 # ===== CONFIGURATIE =====
 
 FEEDS = [
-    # Voeg hier je podcasts toe: korte naam (voor de bestandsnaam) + RSS-URL
-    {"naam": "ADVoetbalpodcast", "rss_url": "https://www.omnycontent.com/d/playlist/33dbd2dc-d464-471d-9feb-abae00330078/6b7fd3a5-faa4-49d7-8618-abae007e950b/176c1b6c-c144-48c0-9b70-abae007e950b/podcast.rss"},
-    {"naam": "NOSVoetbalpodcast", "rss_url": "https://podcast.npo.nl/feed/nos-voetbalpodcast.xml"},
-    {"naam": "KickOffTelegraaf", "rss_url": "https://www.omnycontent.com/d/playlist/fdd7ab40-270d-4a1e-a257-acd200da1324/f12b3a33-c5e5-4921-bb11-ae030151489d/244539d5-19fe-4548-a2dd-ae03015148c2/podcast.rss"},
-    {"naam": "AZPodcastNHD", "rss_url": "https://www.omnycontent.com/d/playlist/fdd7ab40-270d-4a1e-a257-acd200da1324/d8f71e1d-5ad9-4428-b9bf-b441006d81f1/803738c5-fe14-4e7c-8915-b441006d8206/podcast.rss"},
-    {"naam": "VandaagInside", "rss_url": "https://www.omnycontent.com/d/playlist/56ccbbb7-0ff7-4482-9d99-a88800f49f6c/7f3260de-b7ab-4b6d-818a-a96800ba1862/4d7e974e-719e-45f4-84fe-a96800bc8ad7/podcast.rss"},
-    {"naam": "RondoZiggoSport", "rss_url": "https://app.springcast.fm/podcast-xml/17447"},
+    # Voeg hier je podcasts toe: korte naam (voor de bestandsnaam) + RSS-URL + eigen context (bekende stemmen/gasten)
+    {
+        "naam": "ADVoetbalpodcast",
+        "rss_url": "https://www.omnycontent.com/d/playlist/33dbd2dc-d464-471d-9feb-abae00330078/6b7fd3a5-faa4-49d7-8618-abae007e950b/176c1b6c-c144-48c0-9b70-abae007e950b/podcast.rss",
+        "context": (
+            "Vaste presentatoren/analisten (wisselende samenstelling): Etienne Verhoeff (presentator), "
+            "Sjoerd Mossou, Maarten Wijffels, Mikos Gouka (vooral over Feyenoord), Johan Inan (vooral over Ajax), "
+            "Bob Hermus (bespreekt soms de Keuken Kampioen Divisie). Soms is er ook een wisselende gast die hier "
+            "niet in staat — forceer een onbekende stem dus niet naar een van deze namen."
+        )
+    },
+    {
+        "naam": "NOSVoetbalpodcast",
+        "rss_url": "https://podcast.npo.nl/feed/nos-voetbalpodcast.xml",
+        "context": (
+            "De NOS-voetbalcommentatoren nemen de week door. Wisselende samenstelling: Arno Vermeulen, "
+            "Arman Avsaroglu, Thierry Boon, Jan Roelfs, Jeroen Grueter, Jeroen Elshoff. Soms is er ook een "
+            "wisselende gast die hier niet in staat — forceer een onbekende stem dus niet naar een van deze namen."
+        )
+    },
+    {
+        "naam": "KickOffTelegraaf",
+        "rss_url": "https://www.omnycontent.com/d/playlist/fdd7ab40-270d-4a1e-a257-acd200da1324/f12b3a33-c5e5-4921-bb11-ae030151489d/244539d5-19fe-4548-a2dd-ae03015148c2/podcast.rss",
+        "context": (
+            "De vaste gasten zijn voetbalchef Valentijn Driessen, Ajax-watcher Mike Verweij en presentator "
+            "Pim Sedee. Afhankelijk van de aflevering schuiven er ook regelmatig andere analisten en redacteuren "
+            "aan, zoals Hein Keijser, Steven Kooijman, Jeroen Kapteijns, Tijmen Lensink. Soms is er ook een "
+            "wisselende gast die hier niet in staat — forceer een onbekende stem dus niet naar een van deze namen."
+        )
+    },
+    {
+        "naam": "AZPodcastNHD",
+        "rss_url": "https://www.omnycontent.com/d/playlist/fdd7ab40-270d-4a1e-a257-acd200da1324/d8f71e1d-5ad9-4428-b9bf-b441006d81f1/803738c5-fe14-4e7c-8915-b441006d8206/podcast.rss",
+        "context": (
+            "De vaste samenstelling van de AZ Podcast van het Noordhollands Dagblad bestaat uit: Chris Wobben "
+            "(presentator en radiocommentator), Jeroen Haarsma (vaste AZ-clubwatcher en chef sport), Theo Brinkman "
+            "(vaste AZ-clubwatcher) en Brian Wijker (regelmatige deelnemer / AZ-watcher / columnist)."
+        )
+    },
+    {
+        "naam": "VandaagInside",
+        "rss_url": "https://www.omnycontent.com/d/playlist/56ccbbb7-0ff7-4482-9d99-a88800f49f6c/7f3260de-b7ab-4b6d-818a-a96800ba1862/4d7e974e-719e-45f4-84fe-a96800bc8ad7/podcast.rss",
+        "context": (
+            "Bij Vandaag Inside (VI) schuiven naast vaste gezichten Johan Derksen, René van der Gijp en "
+            "presentator Wilfred Genee regelmatig een vaste groep wisselende gasten en deskundigen aan: "
+            "Valentijn Driessen (voetbaljournalist), Merel Ek (politiek verslaggever), Job Knoester (advocaat "
+            "en duider), Hélène Hendriks, Bas Nijhuis (voetbalarbiter), Chris Woerts (sportmarketeer). Soms is "
+            "er ook een wisselende gast die hier niet in staat — forceer een onbekende stem dus niet naar een "
+            "van deze namen."
+        )
+    },
+    {
+        "naam": "RondoZiggoSport",
+        "rss_url": "https://app.springcast.fm/podcast-xml/17447",
+        "context": (
+            "Rondo op Ziggo Sport heeft een vaste presentator en een wisselende tafel van analisten. Vaste "
+            "presentator: Wytse van der Goot (hoofdpresentator), Hélène Hendriks (schuift incidenteel aan als "
+            "vaste invaller). Elke uitzending schuift een selectie aan van vaste analisten: Marco van Basten, "
+            "Ruud Gullit, Rafael van der Vaart, Youri Mulder, Theo Janssen, Wesley Sneijder. Soms is er ook een "
+            "wisselende gast die hier niet in staat — forceer een onbekende stem dus niet naar een van deze namen."
+        )
+    },
 ]
 
 INBOX_FOLDER_ID = "1Sqia5kivNsQgxXbNzBHLNMzE3RJMxwB0"   # ID uit de Drive-URL van je Inbox-map
@@ -180,9 +235,14 @@ def get_whisper_model():
         )
     return _model
 
-def transcribeer(audio_pad):
+def bouw_prompt(feed_context=None):
+    if feed_context:
+        return f"{WHISPER_INITIAL_PROMPT} {feed_context}"
+    return WHISPER_INITIAL_PROMPT
+
+def transcribeer(audio_pad, feed_context=None):
     if ENABLE_DIARIZATION:
-        return transcribeer_met_sprekers(audio_pad)
+        return transcribeer_met_sprekers(audio_pad, feed_context)
 
     model = get_whisper_model()
     segments, _info = model.transcribe(
@@ -190,7 +250,7 @@ def transcribeer(audio_pad):
         language="nl",
         beam_size=WHISPER_BEAM_SIZE,
         vad_filter=WHISPER_VAD_FILTER,
-        initial_prompt=WHISPER_INITIAL_PROMPT
+        initial_prompt=bouw_prompt(feed_context)
     )
     return " ".join(segment.text.strip() for segment in segments)
 
@@ -199,7 +259,7 @@ _align_model = None
 _align_metadata = None
 _diarize_model = None
 
-def transcribeer_met_sprekers(audio_pad):
+def transcribeer_met_sprekers(audio_pad, feed_context=None):
     global _whisperx_model, _align_model, _align_metadata, _diarize_model
     import os
     import whisperx
@@ -208,7 +268,7 @@ def transcribeer_met_sprekers(audio_pad):
     if not hf_token:
         print("WAARSCHUWING: HF_TOKEN ontbreekt, diarization overgeslagen voor deze aflevering (terugval op tekst zonder sprekerlabels).")
         model = get_whisper_model()
-        segments, _ = model.transcribe(str(audio_pad), language="nl", beam_size=WHISPER_BEAM_SIZE, vad_filter=WHISPER_VAD_FILTER, initial_prompt=WHISPER_INITIAL_PROMPT)
+        segments, _ = model.transcribe(str(audio_pad), language="nl", beam_size=WHISPER_BEAM_SIZE, vad_filter=WHISPER_VAD_FILTER, initial_prompt=bouw_prompt(feed_context))
         return " ".join(s.text.strip() for s in segments)
 
     device = "cpu"
@@ -220,7 +280,7 @@ def transcribeer_met_sprekers(audio_pad):
             compute_type="int8",
             language="nl",
             threads=WHISPER_CPU_THREADS,
-            asr_options={"initial_prompt": WHISPER_INITIAL_PROMPT}
+            asr_options={"initial_prompt": bouw_prompt(feed_context)}
         )
     audio = whisperx.load_audio(str(audio_pad))
     result = _whisperx_model.transcribe(audio, batch_size=8, language="nl")
@@ -326,7 +386,7 @@ def main():
 
             try:
                 laad_met_retry(lambda: download_audio(aflevering["audio_url"], audio_pad))
-                tekst = transcribeer(audio_pad)
+                tekst = transcribeer(audio_pad, feed_info.get("context"))
                 bestandsnaam = maak_bestandsnaam(naam, aflevering["datum"])
                 upload_naar_drive(drive, tekst, bestandsnaam)
                 print(f"[{naam}] geüpload als {bestandsnaam}")
