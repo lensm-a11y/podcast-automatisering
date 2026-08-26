@@ -5,7 +5,7 @@ permissions:
 
 on:
   schedule:
-    - cron: '0 16 * * *'   # 16:00 UTC = 18:00 Nederlandse tijd (zomertijd, CEST) — zie toelichting over wintertijd
+    - cron: '0 4 * * *'   # 04:00 UTC = 06:00 Nederlandse tijd (zomertijd, CEST) — draait elke dag. Bij overgang naar wintertijd (eind oktober): pas aan naar '0 5 * * *' (05:00 UTC = 06:00 CET)
   workflow_dispatch:        # hiermee kun je 'm ook handmatig starten vanuit de Actions-tab
 
 jobs:
@@ -26,19 +26,62 @@ jobs:
       - name: Repository ophalen
         uses: actions/checkout@v4
 
+      - name: Bepalen of ${{ matrix.feed }} vandaag aan de beurt is
+        id: planning
+        run: |
+          DAG=$(date -u +%u)   # 1=maandag, 2=dinsdag, 3=woensdag, 4=donderdag, 5=vrijdag, 6=zaterdag, 7=zondag
+          FEED="${{ matrix.feed }}"
+          DOORGAAN=false
+
+          # Weekschema:
+          # Maandag:    NOS, AD
+          # Dinsdag:    AD, VandaagInside, KickOff
+          # Woensdag:   AD, VandaagInside, Rondo
+          # Donderdag:  AD, VandaagInside, AZ
+          # Vrijdag:    AD, VandaagInside
+          # Zaterdag:   VandaagInside, KickOff, NOS
+          # Zondag:     (niets)
+          case "$FEED" in
+            ADVoetbalpodcast)
+              case "$DAG" in 1|2|3|4|5) DOORGAAN=true ;; esac
+              ;;
+            NOSVoetbalpodcast)
+              case "$DAG" in 1|6) DOORGAAN=true ;; esac
+              ;;
+            KickOffTelegraaf)
+              case "$DAG" in 2|6) DOORGAAN=true ;; esac
+              ;;
+            AZPodcastNHD)
+              case "$DAG" in 4) DOORGAAN=true ;; esac
+              ;;
+            VandaagInside)
+              case "$DAG" in 2|3|4|5|6) DOORGAAN=true ;; esac
+              ;;
+            RondoZiggoSport)
+              case "$DAG" in 3) DOORGAAN=true ;; esac
+              ;;
+          esac
+
+          echo "Dag van de week: $DAG, feed: $FEED, doorgaan vandaag: $DOORGAAN"
+          echo "doorgaan=$DOORGAAN" >> "$GITHUB_OUTPUT"
+
       - name: Python installeren
+        if: steps.planning.outputs.doorgaan == 'true'
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
           cache: 'pip'   # scheelt 30-60s per run na de eerste keer
 
       - name: Dependencies installeren
+        if: steps.planning.outputs.doorgaan == 'true'
         run: pip install -r requirements.txt
 
       - name: ffmpeg installeren
+        if: steps.planning.outputs.doorgaan == 'true'
         run: sudo apt-get update && sudo apt-get install -y ffmpeg
 
       - name: Script draaien voor ${{ matrix.feed }}
+        if: steps.planning.outputs.doorgaan == 'true'
         env:
           OAUTH_CLIENT_ID: ${{ secrets.OAUTH_CLIENT_ID }}
           OAUTH_CLIENT_SECRET: ${{ secrets.OAUTH_CLIENT_SECRET }}
@@ -48,6 +91,7 @@ jobs:
         run: python podcast_automatisering.py "${{ matrix.feed }}"
 
       - name: State-bestand van ${{ matrix.feed }} terugschrijven
+        if: steps.planning.outputs.doorgaan == 'true'
         run: |
           git config user.name "podcast-bot"
           git config user.email "podcast-bot@users.noreply.github.com"
