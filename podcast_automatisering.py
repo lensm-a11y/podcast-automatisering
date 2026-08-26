@@ -1,305 +1,346 @@
 """
-transcribeer_met_context.py
-============================
-Transcribeert een audiobestand met faster-whisper, met een initial_prompt
-opgebouwd uit (1) je vaste-deelnemerslijst per show en (2) de shownotes van
-de specifieke aflevering (waar vaak de daadwerkelijke gasten in genoemd
-staan). Dit vergroot de kans dat namen in één keer goed gespeld worden,
-nog vóór de Gemini-correctiestap in Apps Script er iets aan hoeft te doen.
+Podcast-automatisering voor het claims-project
+================================================
+Controleert een lijst RSS-feeds op nieuwe afleveringen, downloadt de audio,
+transcribeert met lokale Whisper, en uploadt het transcript automatisch
+naar de Inbox-map in Google Drive (waar het Apps Script het verder oppakt).
 
-GEBRUIK
--------
-python transcribeer_met_context.py \
-    --audio "aflevering.mp3" \
-    --show "AD Voetbalpodcast" \
-    --shownotes "shownotes_aflevering.txt" \
-    --output "podcast_ADVoetbalpodcast_20260826.txt"
-
-Als je geen shownotes-bestand hebt, laat --shownotes gewoon weg.
-
-VASTE DEELNEMERS
-----------------
-Vul VASTE_DEELNEMERS hieronder in — dit is dezelfde info als in je
-"Podcast-deelnemers"-tabblad in de Overzicht-sheet. Twee plekken met
-dezelfde info onderhouden is niet ideaal, maar dit script draait lokaal en
-kan niet zomaar bij je Google Sheet — kopieer de tekst gewoon over als je
-het tabblad bijwerkt. (Zie de toelichting onderaan dit bestand voor een
-alternatief als je dit wilt automatiseren.)
+Eenmalige opzet die dit script vereist (zie toelichting):
+1. Google Cloud service-account met Drive API aan, JSON-sleutel gedownload.
+2. Die service-account als 'Bewerker' toegevoegd aan de Inbox-map in Drive.
+3. pip install feedparser requests faster-whisper google-api-python-client google-auth
 """
 
-import argparse
+import json
 import re
-import sys
+import time
+from datetime import datetime, timedelta
+from pathlib import Path
 
-# ============================================================
-# VASTE DEELNEMERS PER SHOW — kopieer dit bij uit je "Podcast-deelnemers"-
-# tabblad zodra je dat bijwerkt.
-# ============================================================
-VASTE_DEELNEMERS = {
-    "AD Voetbalpodcast": (
-        "Etienne Verhoeff, Sjoerd Mossou, Maarten Wijffels, Mikos Gouka, "
-        "Johan Inan, Bob Hermus"
-    ),
-    "Kick-off podcast Telegraaf": (
-        "Valentijn Driessen, Mike Verweij, Pim Sedee, Hein Keijser, "
-        "Steven Kooijman, Jeroen Kapteijns, Tijmen Lensink"
-    ),
-    "NOS Voetbalpodcast": (
-        "Arno Vermeulen, Arman Avsaroglu, Thierry Boon, Jan Roelfs, "
-        "Jeroen Grueter, Jeroen Elshoff"
-    ),
-    "AZ Podcast (NHD)": (
-        "Chris Wobben, Jeroen Haarsma, Theo Brinkman, Brian Wijker"
-    ),
-    "Rondo": (
-        "Wytse van der Goot, Hélène Hendriks, Marco van Basten, Ruud Gullit, "
-        "Rafael van der Vaart, Youri Mulder, Theo Janssen, Wesley Sneijder"
-    ),
-    "Vandaag Inside": (
-        "Johan Derksen, René van der Gijp, Wilfred Genee, Valentijn Driessen, "
-        "Merel Ek, Job Knoester, Hélène Hendriks, Bas Nijhuis, Chris Woerts"
-    ),
-}
+import feedparser
+import requests
+from faster_whisper import WhisperModel
+from google.oauth2 import service_account
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaFileUpload
 
-ALGEMENE_CONTEXT = (
-    "Dit is een Nederlandstalige voetbalpodcast. Onderwerpen: competities, "
-    "clubs, spelers, transfers, wedstrijden, trainers."
-)
+# ===== CONFIGURATIE =====
 
+FEEDS = [
+    # Voeg hier je podcasts toe: korte naam (voor de bestandsnaam) + RSS-URL
+    {"naam": "ADVoetbalpodcast", "rss_url": "https://www.omnycontent.com/d/playlist/33dbd2dc-d464-471d-9feb-abae00330078/6b7fd3a5-faa4-49d7-8618-abae007e950b/176c1b6c-c144-48c0-9b70-abae007e950b/podcast.rss"},
+    {"naam": "NOSVoetbalpodcast", "rss_url": "https://podcast.npo.nl/feed/nos-voetbalpodcast.xml"},
+    {"naam": "KickOffTelegraaf", "rss_url": "https://www.omnycontent.com/d/playlist/fdd7ab40-270d-4a1e-a257-acd200da1324/f12b3a33-c5e5-4921-bb11-ae030151489d/244539d5-19fe-4548-a2dd-ae03015148c2/podcast.rss"},
+    {"naam": "AZPodcastNHD", "rss_url": "https://www.omnycontent.com/d/playlist/fdd7ab40-270d-4a1e-a257-acd200da1324/d8f71e1d-5ad9-4428-b9bf-b441006d81f1/803738c5-fe14-4e7c-8915-b441006d8206/podcast.rss"},
+    {"naam": "VandaagInside", "rss_url": "https://www.omnycontent.com/d/playlist/56ccbbb7-0ff7-4482-9d99-a88800f49f6c/7f3260de-b7ab-4b6d-818a-a96800ba1862/4d7e974e-719e-45f4-84fe-a96800bc8ad7/podcast.rss"},
+    {"naam": "RondoZiggoSport", "rss_url": "https://app.springcast.fm/podcast-xml/17447"},
+]
 
-def haal_namen_uit_shownotes(pad):
-    """
-    Simpele, robuuste extractie: pakt woordreeksen die met een hoofdletter
-    beginnen en die typisch op een naam lijken (Voornaam Achternaam).
-    Dit is bewust een grove aanpak, geen echte named-entity-recognition —
-    het doel is niet perfectie, maar een goede kans dat de shownotes-namen
-    ook echt in het initial_prompt terechtkomen. Overtollige/foute treffers
-    zijn onschuldig: het initial_prompt hoeft niet perfect te zijn om nuttig
-    te zijn.
-    """
-    with open(pad, "r", encoding="utf-8") as f:
-        tekst = f.read()
+INBOX_FOLDER_ID = "1Sqia5kivNsQgxXbNzBHLNMzE3RJMxwB0"   # ID uit de Drive-URL van je Inbox-map
+WHISPER_MODEL_GROOTTE = "large-v3"        # zwaarste, meest nauwkeurige model — kwaliteit boven snelheid
+WHISPER_INITIAL_PROMPT = (
+    "Dit is een Nederlandstalige voetbalpodcast. Er wordt gesproken over wedstrijden, "
+    "transfers, tactiek, blessures en clubnieuws. Veelgebruikte termen: elftal, aanvoerder, "
+    "scheidsrechter, buitenspel, penalty, corner, vrije trap, gele kaart, rode kaart, wissel, "
+    "basisopstelling, bank, degradatie, promotie, play-offs, Champions League, Europa League, "
+    "Eredivisie, KNVB Beker, transferwindow, huurbasis, aflossing. Clubs: Ajax, Feyenoord, PSV, "
+    "AZ, FC Twente, FC Utrecht, Vitesse, Go Ahead Eagles, NEC, Heerenveen, Sparta Rotterdam, "
+    "Fortuna Sittard, Excelsior, Heracles Almelo, RKC Waalwijk, Willem II, NAC Breda. "
+    "Posities: keeper, centrale verdediger, linksback, rechtsback, controleur, aanvallende "
+    "middenvelder, buitenspeler, spits."
+)  # helpt het model voetbal-specifieke namen, termen en context correct te herkennen
+WHISPER_CPU_THREADS = 4                   # match het aantal vCPU's van de runner (public repo = 4)
+WHISPER_BEAM_SIZE = 5                     # verhoogd van 1 naar 5 (standaard-Whisper-instelling) — kwaliteit boven snelheid
+WHISPER_VAD_FILTER = True                 # slaat stiltes/muziek/intro's over — vaak een flinke tijdsbesparing bij podcasts
+TIJDELIJKE_AUDIO_MAP = Path("tmp_audio")
+MAX_AFLEVERING_LEEFTIJD_DAGEN = 60  # TIJDELIJK ruim gezet voor de eerste testronde — zet dit terug naar bv. 7 zodra alles werkt
+ALLEEN_LAATSTE_AFLEVERING = True    # True = per feed maximaal 1 (de meest recente) nieuwe aflevering per run verwerken
+ENABLE_DIARIZATION = True           # True = sprekers labelen (SPEAKER_00, etc.) via WhisperX+pyannote, trager dan zonder
+SERVICE_ACCOUNT_JSON = "service_account.json"  # alleen gebruikt als fallback bij een Shared Drive/Workspace-account, zie get_drive_service()
 
-    # Patroon: twee of drie opeenvolgende woorden die met een hoofdletter
-    # beginnen (dekt "Jan de Vries", "Piet Bakker", etc.)
-    kandidaten = re.findall(
-        r"\b([A-ZÀ-Ý][a-zà-ÿ'’]+(?:\s+(?:de|van|der|den|van der|van den)\s+)?"
-        r"[A-ZÀ-Ý][a-zà-ÿ'’]+(?:\s+[A-ZÀ-Ý][a-zà-ÿ'’]+)?)\b",
-        tekst,
+import threading
+
+class Hartslag:
+    """Print elke paar minuten een teken van leven tijdens lange, stille stappen,
+    zodat de run niet als 'hangend' wordt beschouwd bij langdurige stilte in de output."""
+    def __init__(self, label, interval_seconden=180):
+        self.label = label
+        self.interval = interval_seconden
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._loop, daemon=True)
+
+    def _loop(self):
+        while not self._stop.wait(self.interval):
+            print(f"... {self.label} nog bezig, geen zorgen ...")
+
+    def __enter__(self):
+        self._thread.start()
+        return self
+
+    def __exit__(self, *args):
+        self._stop.set()
+
+# ===== Hulpfunctie: automatisch opnieuw proberen bij tijdelijke netwerk-/SSL-haperingen =====
+
+def laad_met_retry(functie, pogingen=3, wachttijd_seconden=15):
+    laatste_fout = None
+    for poging in range(1, pogingen + 1):
+        try:
+            return functie()
+        except Exception as e:
+            laatste_fout = e
+            print(f"Poging {poging}/{pogingen} mislukt ({e}), {wachttijd_seconden}s wachten en opnieuw proberen...")
+            time.sleep(wachttijd_seconden)
+    raise laatste_fout
+
+# ===== STATE: welke afleveringen zijn al verwerkt =====
+
+def laad_state(state_bestand):
+    if Path(state_bestand).exists():
+        return json.loads(Path(state_bestand).read_text())
+    return []
+
+def sla_state_op(state_bestand, verwerkte_ids):
+    Path(state_bestand).write_text(json.dumps(verwerkte_ids, indent=2))
+
+# ===== RSS: nieuwe afleveringen herkennen =====
+
+def vind_nieuwe_afleveringen(feed_url, al_verwerkt):
+    feed = feedparser.parse(feed_url)
+    nieuw = []
+    grens = datetime.now() - timedelta(days=MAX_AFLEVERING_LEEFTIJD_DAGEN)
+
+    for entry in feed.entries:
+        episode_id = entry.get("id") or entry.get("link")
+        if episode_id in al_verwerkt:
+            continue  # deze hadden we al
+
+        pub_datum_dt = None
+        if entry.get("published_parsed"):
+            pub_datum_dt = datetime(*entry.published_parsed[:6])
+            if pub_datum_dt < grens:
+                continue  # te oud, negeren (voorkomt verwerken van de hele feedgeschiedenis)
+
+        audio_url = None
+        for enclosure in entry.get("enclosures", []):
+            if enclosure.get("type", "").startswith("audio"):
+                audio_url = enclosure.get("href")
+                break
+        if not audio_url:
+            continue  # geen audio gevonden in dit item, overslaan
+
+        pub_datum = pub_datum_dt.strftime("%Y%m%d") if pub_datum_dt else None
+
+        nieuw.append({
+            "id": episode_id,
+            "titel": entry.get("title", "aflevering"),
+            "audio_url": audio_url,
+            "datum": pub_datum,
+            "_sorteerdatum": pub_datum_dt or datetime.min  # ontbrekende datum onderaan sorteren
+        })
+
+    # Nieuwste eerst -- belangrijk zodat "alleen de laatste" ook echt de laatste is,
+    # ongeacht de volgorde waarin de RSS-feed de items levert.
+    nieuw.sort(key=lambda a: a["_sorteerdatum"], reverse=True)
+    for a in nieuw:
+        del a["_sorteerdatum"]
+
+    if ALLEEN_LAATSTE_AFLEVERING:
+        nieuw = nieuw[:1]
+
+    return nieuw
+
+# ===== Audio downloaden =====
+
+def download_audio(url, doelpad):
+    TIJDELIJKE_AUDIO_MAP.mkdir(exist_ok=True)
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
+    }
+    with requests.get(url, stream=True, timeout=60, headers=headers) as r:
+        r.raise_for_status()
+        with open(doelpad, "wb") as f:
+            for chunk in r.iter_content(chunk_size=8192):
+                f.write(chunk)
+    return doelpad
+
+# ===== Whisper: transcriberen =====
+
+_model = None
+
+def get_whisper_model():
+    global _model
+    if _model is None:
+        print(f"Whisper-model laden ({WHISPER_MODEL_GROOTTE}, {WHISPER_CPU_THREADS} threads)...")
+        _model = WhisperModel(
+            WHISPER_MODEL_GROOTTE,
+            device="cpu",
+            compute_type="int8",
+            cpu_threads=WHISPER_CPU_THREADS
+        )
+    return _model
+
+def transcribeer(audio_pad):
+    if ENABLE_DIARIZATION:
+        return transcribeer_met_sprekers(audio_pad)
+
+    model = get_whisper_model()
+    segments, _info = model.transcribe(
+        str(audio_pad),
+        language="nl",
+        beam_size=WHISPER_BEAM_SIZE,
+        vad_filter=WHISPER_VAD_FILTER,
+        initial_prompt=WHISPER_INITIAL_PROMPT
     )
-    # Dedupliceren, volgorde behouden
-    gezien = set()
-    namen = []
-    for naam in kandidaten:
-        naam = naam.strip()
-        if naam and naam not in gezien:
-            gezien.add(naam)
-            namen.append(naam)
-    return namen
+    return " ".join(segment.text.strip() for segment in segments)
 
+_whisperx_model = None
+_align_model = None
+_align_metadata = None
+_diarize_model = None
 
-def bouw_initial_prompt(show, shownotes_pad):
-    delen = [ALGEMENE_CONTEXT]
+def transcribeer_met_sprekers(audio_pad):
+    global _whisperx_model, _align_model, _align_metadata, _diarize_model
+    import os
+    import whisperx
 
-    vaste_namen = VASTE_DEELNEMERS.get(show)
-    if vaste_namen:
-        delen.append("Vaste deelnemers aan deze show: " + vaste_namen + ".")
-    else:
-        print(
-            f"WAARSCHUWING: '{show}' niet gevonden in VASTE_DEELNEMERS — "
-            "controleer de spelling, of vul het dictionary bovenaan dit "
-            "script aan.",
-            file=sys.stderr,
-        )
+    hf_token = os.environ.get("HF_TOKEN")
+    if not hf_token:
+        print("WAARSCHUWING: HF_TOKEN ontbreekt, diarization overgeslagen voor deze aflevering (terugval op tekst zonder sprekerlabels).")
+        model = get_whisper_model()
+        segments, _ = model.transcribe(str(audio_pad), language="nl", beam_size=WHISPER_BEAM_SIZE, vad_filter=WHISPER_VAD_FILTER, initial_prompt=WHISPER_INITIAL_PROMPT)
+        return " ".join(s.text.strip() for s in segments)
 
-    if shownotes_pad:
-        namen_uit_notes = haal_namen_uit_shownotes(shownotes_pad)
-        if namen_uit_notes:
-            delen.append(
-                "Namen genoemd in de shownotes van deze aflevering (mogelijk "
-                "gasten): " + ", ".join(namen_uit_notes) + "."
-            )
-
-    # Whisper's initial_prompt heeft een praktische lengtelimiet (context-
-    # window van het model) — hou het compact.
-    prompt = " ".join(delen)
-    return prompt[:800]
-
-
-def zoek_show_naam(brontitel_uit_bestandsnaam):
-    """
-    Tolerante matching tussen een brontitel uit een bestandsnaam (bv.
-    "ADVoetbalpodcast", zonder spaties) en de keys in VASTE_DEELNEMERS
-    (bv. "AD Voetbalpodcast", met spaties) — zelfde aanpak als
-    zoekBekendeDeelnemers_ in het Apps Script.
-    """
-    def normaliseer(s):
-        return re.sub(r"[^a-z0-9]", "", s.lower())
-
-    zoekterm = normaliseer(brontitel_uit_bestandsnaam)
-    for show_naam in VASTE_DEELNEMERS:
-        genormaliseerd = normaliseer(show_naam)
-        if zoekterm in genormaliseerd or genormaliseerd in zoekterm:
-            return show_naam
-    return None
-
-
-def parse_bestandsnaam(bestandsnaam):
-    """
-    Verwacht dezelfde conventie als de Apps Script-kant: brontype_brontitel(_datum).ext
-    Retourneert (brontype, brontitel_ruw) of (None, None) als het patroon niet past.
-    """
-    naam_zonder_ext = re.sub(r"\.[^.]+$", "", bestandsnaam)
-    delen = naam_zonder_ext.split("_")
-    if len(delen) < 2:
-        return None, None
-    # Negeer een eventueel datumsegment vooraan, voor compatibiliteit met de
-    # oudere naamconventie.
-    if re.match(r"^\d{4}-\d{2}-\d{2}$", delen[0]):
-        delen = delen[1:]
-    if len(delen) < 2:
-        return None, None
-    return delen[0], delen[1]
-
-
-def batch_verwerk(audio_map, output_map, model_naam):
-    import glob
-
-    os_makedirs(output_map)
-    AUDIO_EXTENSIES = (".mp3", ".wav", ".m4a", ".ogg", ".flac")
-
-    bestanden = [
-        f for f in sorted(glob.glob(f"{audio_map}/*"))
-        if f.lower().endswith(AUDIO_EXTENSIES)
-    ]
-    if not bestanden:
-        print(f"Geen audiobestanden gevonden in {audio_map} (verwacht: {', '.join(AUDIO_EXTENSIES)}).")
-        return
-
-    print(f"{len(bestanden)} audiobestand(en) gevonden. Model wordt eenmalig geladen...")
-
-    from faster_whisper import WhisperModel
-    model = WhisperModel(model_naam, device="auto", compute_type="auto")
-
-    for i, audio_pad in enumerate(bestanden, 1):
-        bestandsnaam = audio_pad.split("/")[-1]
-        brontype, brontitel_ruw = parse_bestandsnaam(bestandsnaam)
-
-        print(f"\n[{i}/{len(bestanden)}] {bestandsnaam}")
-
-        if not brontitel_ruw:
-            print(
-                f"  WAARSCHUWING: bestandsnaam volgt niet de brontype_brontitel-conventie, "
-                f"transcribeer zonder specifieke show-context."
-            )
-            initial_prompt = ALGEMENE_CONTEXT
-        else:
-            show_naam = zoek_show_naam(brontitel_uit_bestandsnaam=brontitel_ruw)
-            if not show_naam:
-                print(f"  WAARSCHUWING: geen match gevonden in VASTE_DEELNEMERS voor '{brontitel_ruw}'.")
-            else:
-                print(f"  Show herkend als: {show_naam}")
-
-            # Optionele shownotes: zelfde bestandsnaam + _shownotes.txt
-            shownotes_pad = re.sub(r"\.[^.]+$", "_shownotes.txt", audio_pad)
-            shownotes_pad = shownotes_pad if os_bestaat(shownotes_pad) else None
-            if shownotes_pad:
-                print(f"  Shownotes gevonden: {shownotes_pad}")
-
-            initial_prompt = bouw_initial_prompt(show_naam or "", shownotes_pad)
-
-        segments, info = model.transcribe(
-            audio_pad,
+    device = "cpu"
+    if _whisperx_model is None:
+        print("WhisperX-model laden voor transcriptie + uitlijning (eenmalig per run)...")
+        _whisperx_model = whisperx.load_model(
+            WHISPER_MODEL_GROOTTE,
+            device,
+            compute_type="int8",
             language="nl",
-            initial_prompt=initial_prompt,
-            vad_filter=True,
+            threads=WHISPER_CPU_THREADS,
+            asr_options={"initial_prompt": WHISPER_INITIAL_PROMPT}
         )
+    audio = whisperx.load_audio(str(audio_pad))
+    result = _whisperx_model.transcribe(audio, batch_size=8, language="nl")
 
-        output_naam = re.sub(r"\.[^.]+$", ".txt", bestandsnaam)
-        output_pad = f"{output_map}/{output_naam}"
-        with open(output_pad, "w", encoding="utf-8") as f:
-            for segment in segments:
-                f.write(segment.text.strip() + " ")
+    print("Woorden uitlijnen...")
+    if _align_model is None:
+        _align_model, _align_metadata = whisperx.load_align_model(language_code="nl", device=device)
+    with Hartslag("Woorden uitlijnen"):
+        result = whisperx.align(result["segments"], _align_model, _align_metadata, audio, device, return_char_alignments=False)
 
-        print(f"  Weggeschreven: {output_pad}")
+    print("Sprekers herkennen (diarization)...")
+    if _diarize_model is None:
+        _diarize_model = laad_met_retry(lambda: whisperx.diarize.DiarizationPipeline(token=hf_token, device=device))
+    with Hartslag("Sprekers herkennen"):
+        diarize_segments = laad_met_retry(lambda: _diarize_model(audio))
+    result = whisperx.assign_word_speakers(diarize_segments, result)
 
-    print(f"\nKlaar. {len(bestanden)} bestand(en) getranscribeerd naar {output_map}/")
-    print("Upload de .txt-bestanden daaruit naar de Inbox-map in Drive om verder te gaan.")
+    regels = []
+    for seg in result["segments"]:
+        spreker = seg.get("speaker", "Onbekende spreker")
+        tekst = seg.get("text", "").strip()
+        if tekst:
+            regels.append(f"{spreker}: {tekst}")
+    return "\n".join(regels)
 
+# ===== Drive: uploaden naar Inbox =====
 
-def os_makedirs(pad):
+def get_drive_service():
     import os
-    os.makedirs(pad, exist_ok=True)
+    from google.oauth2.credentials import Credentials as UserCredentials
 
+    client_id = os.environ.get("OAUTH_CLIENT_ID")
+    client_secret = os.environ.get("OAUTH_CLIENT_SECRET")
+    refresh_token = os.environ.get("OAUTH_REFRESH_TOKEN")
 
-def os_bestaat(pad):
-    import os
-    return os.path.isfile(pad)
+    if client_id and client_secret and refresh_token:
+        # Cloud-variant (GitHub Actions): inloggen als jijzelf i.p.v. als service-account.
+        # Dit is de aanbevolen route bij een persoonlijk Google-account, omdat een
+        # service-account geen eigen opslagquota heeft en dus niet naar een gewone
+        # "Mijn Drive"-map mag schrijven (HttpError 403: storageQuotaExceeded).
+        creds = UserCredentials(
+            token=None,
+            refresh_token=refresh_token,
+            client_id=client_id,
+            client_secret=client_secret,
+            token_uri="https://oauth2.googleapis.com/token",
+            scopes=["https://www.googleapis.com/auth/drive"],
+        )
+    else:
+        # Lokale variant / fallback: service-account-bestand op schijf.
+        # Werkt alleen bij een Shared Drive of een Google Workspace-account met
+        # domeindelegatie -- niet bij een gewoon persoonlijk Google-account.
+        creds = service_account.Credentials.from_service_account_file(
+            SERVICE_ACCOUNT_JSON, scopes=["https://www.googleapis.com/auth/drive"]
+        )
+    return build("drive", "v3", credentials=creds)
 
+def upload_naar_drive(service, tekst, bestandsnaam):
+    tijdelijk_pad = TIJDELIJKE_AUDIO_MAP / bestandsnaam
+    tijdelijk_pad.write_text(tekst, encoding="utf-8")
+
+    metadata = {"name": bestandsnaam, "parents": [INBOX_FOLDER_ID]}
+    media = MediaFileUpload(str(tijdelijk_pad), mimetype="text/plain")
+    bestand = service.files().create(body=metadata, media_body=media, fields="id").execute()
+    tijdelijk_pad.unlink()
+    return bestand.get("id")
+
+# ===== Bestandsnaam bouwen volgens de conventie: brontype_brontitel_YYYYMMDD.txt =====
+
+def maak_bestandsnaam(bron_titel, datum):
+    schoon = re.sub(r"[^A-Za-z0-9]+", "", bron_titel)
+    if datum:
+        return f"podcast_{schoon}_{datum}.txt"
+    return f"podcast_{schoon}.txt"
+
+# ===== Hoofdproces =====
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--audio", help="Pad naar één audiobestand (voor losse verwerking)")
-    parser.add_argument("--show", help="Naam van de show, zoals in VASTE_DEELNEMERS (bij --audio)")
-    parser.add_argument("--shownotes", default=None, help="Pad naar shownotes-tekstbestand (optioneel, bij --audio)")
-    parser.add_argument("--output", help="Pad voor het uitvoerbestand .txt (bij --audio)")
-    parser.add_argument("--batch-folder", default=None, help="Map met meerdere audiobestanden om in één keer te verwerken")
-    parser.add_argument("--output-folder", default=None, help="Map waar de .txt-resultaten van --batch-folder naartoe gaan")
-    parser.add_argument("--model", default="large-v3", help="Whisper-modelgrootte (default: large-v3)")
-    args = parser.parse_args()
+    import sys
+    alleen_deze_feed = sys.argv[1] if len(sys.argv) > 1 else None
 
-    if args.batch_folder:
-        if not args.output_folder:
-            parser.error("--output-folder is verplicht in combinatie met --batch-folder")
-        batch_verwerk(args.batch_folder, args.output_folder, args.model)
+    drive = get_drive_service()
+    te_verwerken_feeds = [f for f in FEEDS if not alleen_deze_feed or f["naam"] == alleen_deze_feed]
+
+    if alleen_deze_feed and not te_verwerken_feeds:
+        print(f"FOUT: feed '{alleen_deze_feed}' niet gevonden in FEEDS.")
         return
 
-    if not (args.audio and args.show and args.output):
-        parser.error("Geef ofwel --batch-folder + --output-folder, ofwel --audio + --show + --output")
+    for feed_info in te_verwerken_feeds:
+        naam = feed_info["naam"]
+        state_bestand = f"verwerkte_{naam}.json"  # eigen bestand per podcast -> geen git-conflicten bij parallelle runs
+        al_verwerkt = laad_state(state_bestand)
+        nieuwe = vind_nieuwe_afleveringen(feed_info["rss_url"], al_verwerkt)
 
-    initial_prompt = bouw_initial_prompt(args.show, args.shownotes)
-    print("Gebruikt initial_prompt:\n" + initial_prompt + "\n")
+        if not nieuwe:
+            print(f"[{naam}] geen nieuwe afleveringen.")
+            continue
 
-    from faster_whisper import WhisperModel
+        for aflevering in nieuwe:
+            print(f"[{naam}] nieuwe aflevering gevonden: {aflevering['titel']}")
+            veilig_id = re.sub(r"[^A-Za-z0-9]", "", aflevering["id"])[:12]
+            audio_pad = TIJDELIJKE_AUDIO_MAP / f"{naam}_{veilig_id}.mp3"
 
-    print(f"Model laden ({args.model})...")
-    model = WhisperModel(args.model, device="auto", compute_type="auto")
+            try:
+                laad_met_retry(lambda: download_audio(aflevering["audio_url"], audio_pad))
+                tekst = transcribeer(audio_pad)
+                bestandsnaam = maak_bestandsnaam(naam, aflevering["datum"])
+                upload_naar_drive(drive, tekst, bestandsnaam)
+                print(f"[{naam}] geüpload als {bestandsnaam}")
 
-    print(f"Transcriberen: {args.audio}")
-    segments, info = model.transcribe(
-        args.audio,
-        language="nl",
-        initial_prompt=initial_prompt,
-        vad_filter=True,
-    )
+                al_verwerkt.append(aflevering["id"])
+                sla_state_op(state_bestand, al_verwerkt)  # meteen opslaan, niet pas aan het eind
+            except Exception as e:
+                print(f"[{naam}] FOUT bij '{aflevering['titel']}': {e}")
+                # deze aflevering NIET aan verwerkt toevoegen -> volgende run opnieuw geprobeerd
+            finally:
+                if audio_pad.exists():
+                    audio_pad.unlink()  # audio zelf hoeft niet bewaard te blijven
 
-    with open(args.output, "w", encoding="utf-8") as f:
-        for segment in segments:
-            f.write(segment.text.strip() + " ")
-
-    print(f"Klaar. Transcript weggeschreven naar: {args.output}")
-    print(
-        "Vergeet niet: dit bestand nog in de bestandsnaam-conventie "
-        "brontype_brontitel.ext zetten en naar de Inbox-map te uploaden."
-    )
-
+            time.sleep(2)  # even rustig aan tussen afleveringen
 
 if __name__ == "__main__":
     main()
-
-
-# ============================================================
-# TOELICHTING — dubbel onderhoud van de deelnemerslijst voorkomen
-# ============================================================
-#
-# Dit script en je "Podcast-deelnemers"-tabblad in Google Sheets bevatten nu
-# dezelfde informatie op twee plekken. Dat is met opzet niet geautomatiseerd
-# gekoppeld: dit script draait lokaal op jouw machine (waar de audio staat),
-# de Sheet leeft in Google Drive — die twee werelden raken elkaar pas zodra
-# jij het transcript uploadt.
-#
-# Wil je dit later toch koppelen? De praktische route is dan: exporteer het
-# "Podcast-deelnemers"-tabblad af en toe als CSV (Bestand > Downloaden > CSV
-# in Google Sheets) en laat dit script die CSV inlezen in plaats van de
-# VASTE_DEELNEMERS-dictionary hierboven. Zeg het gerust als je dat wilt —
-# dat is een kleine aanpassing van dit script.
