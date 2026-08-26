@@ -126,20 +126,140 @@ def bouw_initial_prompt(show, shownotes_pad):
     return prompt[:800]
 
 
+def zoek_show_naam(brontitel_uit_bestandsnaam):
+    """
+    Tolerante matching tussen een brontitel uit een bestandsnaam (bv.
+    "ADVoetbalpodcast", zonder spaties) en de keys in VASTE_DEELNEMERS
+    (bv. "AD Voetbalpodcast", met spaties) — zelfde aanpak als
+    zoekBekendeDeelnemers_ in het Apps Script.
+    """
+    def normaliseer(s):
+        return re.sub(r"[^a-z0-9]", "", s.lower())
+
+    zoekterm = normaliseer(brontitel_uit_bestandsnaam)
+    for show_naam in VASTE_DEELNEMERS:
+        genormaliseerd = normaliseer(show_naam)
+        if zoekterm in genormaliseerd or genormaliseerd in zoekterm:
+            return show_naam
+    return None
+
+
+def parse_bestandsnaam(bestandsnaam):
+    """
+    Verwacht dezelfde conventie als de Apps Script-kant: brontype_brontitel(_datum).ext
+    Retourneert (brontype, brontitel_ruw) of (None, None) als het patroon niet past.
+    """
+    naam_zonder_ext = re.sub(r"\.[^.]+$", "", bestandsnaam)
+    delen = naam_zonder_ext.split("_")
+    if len(delen) < 2:
+        return None, None
+    # Negeer een eventueel datumsegment vooraan, voor compatibiliteit met de
+    # oudere naamconventie.
+    if re.match(r"^\d{4}-\d{2}-\d{2}$", delen[0]):
+        delen = delen[1:]
+    if len(delen) < 2:
+        return None, None
+    return delen[0], delen[1]
+
+
+def batch_verwerk(audio_map, output_map, model_naam):
+    import glob
+
+    os_makedirs(output_map)
+    AUDIO_EXTENSIES = (".mp3", ".wav", ".m4a", ".ogg", ".flac")
+
+    bestanden = [
+        f for f in sorted(glob.glob(f"{audio_map}/*"))
+        if f.lower().endswith(AUDIO_EXTENSIES)
+    ]
+    if not bestanden:
+        print(f"Geen audiobestanden gevonden in {audio_map} (verwacht: {', '.join(AUDIO_EXTENSIES)}).")
+        return
+
+    print(f"{len(bestanden)} audiobestand(en) gevonden. Model wordt eenmalig geladen...")
+
+    from faster_whisper import WhisperModel
+    model = WhisperModel(model_naam, device="auto", compute_type="auto")
+
+    for i, audio_pad in enumerate(bestanden, 1):
+        bestandsnaam = audio_pad.split("/")[-1]
+        brontype, brontitel_ruw = parse_bestandsnaam(bestandsnaam)
+
+        print(f"\n[{i}/{len(bestanden)}] {bestandsnaam}")
+
+        if not brontitel_ruw:
+            print(
+                f"  WAARSCHUWING: bestandsnaam volgt niet de brontype_brontitel-conventie, "
+                f"transcribeer zonder specifieke show-context."
+            )
+            initial_prompt = ALGEMENE_CONTEXT
+        else:
+            show_naam = zoek_show_naam(brontitel_uit_bestandsnaam=brontitel_ruw)
+            if not show_naam:
+                print(f"  WAARSCHUWING: geen match gevonden in VASTE_DEELNEMERS voor '{brontitel_ruw}'.")
+            else:
+                print(f"  Show herkend als: {show_naam}")
+
+            # Optionele shownotes: zelfde bestandsnaam + _shownotes.txt
+            shownotes_pad = re.sub(r"\.[^.]+$", "_shownotes.txt", audio_pad)
+            shownotes_pad = shownotes_pad if os_bestaat(shownotes_pad) else None
+            if shownotes_pad:
+                print(f"  Shownotes gevonden: {shownotes_pad}")
+
+            initial_prompt = bouw_initial_prompt(show_naam or "", shownotes_pad)
+
+        segments, info = model.transcribe(
+            audio_pad,
+            language="nl",
+            initial_prompt=initial_prompt,
+            vad_filter=True,
+        )
+
+        output_naam = re.sub(r"\.[^.]+$", ".txt", bestandsnaam)
+        output_pad = f"{output_map}/{output_naam}"
+        with open(output_pad, "w", encoding="utf-8") as f:
+            for segment in segments:
+                f.write(segment.text.strip() + " ")
+
+        print(f"  Weggeschreven: {output_pad}")
+
+    print(f"\nKlaar. {len(bestanden)} bestand(en) getranscribeerd naar {output_map}/")
+    print("Upload de .txt-bestanden daaruit naar de Inbox-map in Drive om verder te gaan.")
+
+
+def os_makedirs(pad):
+    import os
+    os.makedirs(pad, exist_ok=True)
+
+
+def os_bestaat(pad):
+    import os
+    return os.path.isfile(pad)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--audio", required=True, help="Pad naar het audiobestand")
-    parser.add_argument("--show", required=True, help="Naam van de show, zoals in VASTE_DEELNEMERS")
-    parser.add_argument("--shownotes", default=None, help="Pad naar een tekstbestand met de shownotes (optioneel)")
-    parser.add_argument("--output", required=True, help="Pad voor het uitvoerbestand (.txt)")
+    parser.add_argument("--audio", help="Pad naar één audiobestand (voor losse verwerking)")
+    parser.add_argument("--show", help="Naam van de show, zoals in VASTE_DEELNEMERS (bij --audio)")
+    parser.add_argument("--shownotes", default=None, help="Pad naar shownotes-tekstbestand (optioneel, bij --audio)")
+    parser.add_argument("--output", help="Pad voor het uitvoerbestand .txt (bij --audio)")
+    parser.add_argument("--batch-folder", default=None, help="Map met meerdere audiobestanden om in één keer te verwerken")
+    parser.add_argument("--output-folder", default=None, help="Map waar de .txt-resultaten van --batch-folder naartoe gaan")
     parser.add_argument("--model", default="large-v3", help="Whisper-modelgrootte (default: large-v3)")
     args = parser.parse_args()
+
+    if args.batch_folder:
+        if not args.output_folder:
+            parser.error("--output-folder is verplicht in combinatie met --batch-folder")
+        batch_verwerk(args.batch_folder, args.output_folder, args.model)
+        return
+
+    if not (args.audio and args.show and args.output):
+        parser.error("Geef ofwel --batch-folder + --output-folder, ofwel --audio + --show + --output")
 
     initial_prompt = bouw_initial_prompt(args.show, args.shownotes)
     print("Gebruikt initial_prompt:\n" + initial_prompt + "\n")
 
-    # Lazy import, zodat je dit script ook kunt draaien om alleen het
-    # initial_prompt te bekijken zonder faster-whisper geïnstalleerd te hebben.
     from faster_whisper import WhisperModel
 
     print(f"Model laden ({args.model})...")
