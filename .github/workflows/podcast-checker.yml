@@ -87,6 +87,7 @@ jobs:
           OAUTH_CLIENT_SECRET: ${{ secrets.OAUTH_CLIENT_SECRET }}
           OAUTH_REFRESH_TOKEN: ${{ secrets.OAUTH_REFRESH_TOKEN }}
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           PYTHONUNBUFFERED: "1"   # zorgt dat print()-regels meteen zichtbaar zijn in de log, i.p.v. pas aan het eind
         run: python podcast_automatisering.py "${{ matrix.feed }}"
 
