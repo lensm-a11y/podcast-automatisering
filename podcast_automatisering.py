@@ -111,6 +111,8 @@ TIJDELIJKE_AUDIO_MAP = Path("tmp_audio")
 MAX_AFLEVERING_LEEFTIJD_DAGEN = 60  # TIJDELIJK ruim gezet voor de eerste testronde — zet dit terug naar bv. 7 zodra alles werkt
 ALLEEN_LAATSTE_AFLEVERING = True    # True = per feed maximaal 1 (de meest recente) nieuwe aflevering per run verwerken
 ENABLE_DIARIZATION = True           # True = sprekers labelen (SPEAKER_00, etc.) via WhisperX+pyannote, trager dan zonder
+ENABLE_LLM_VERRIJKING = True        # True = ruwe SPEAKER_XX-labels omzetten naar echte namen + reclame eruit filteren via Gemini
+GEMINI_MODEL = "gemini-2.5-flash"
 SERVICE_ACCOUNT_JSON = "service_account.json"  # alleen gebruikt als fallback bij een Shared Drive/Workspace-account, zie get_drive_service()
 
 import threading
@@ -306,6 +308,51 @@ def transcribeer_met_sprekers(audio_pad, feed_context=None):
             regels.append(f"{spreker}: {tekst}")
     return "\n".join(regels)
 
+# ===== Verrijking: SPEAKER_XX -> echte namen, en reclame eruit filteren (via Gemini) =====
+
+def verrijk_met_llm(ruwe_tekst, feed_naam, feed_context):
+    import os
+    apikey = os.environ.get("GEMINI_API_KEY")
+    if not apikey:
+        print(f"WAARSCHUWING: GEMINI_API_KEY ontbreekt, verrijking overgeslagen voor {feed_naam} (ruwe SPEAKER_XX-labels blijven staan).")
+        return ruwe_tekst
+
+    prompt = f"""Je krijgt hieronder een ruwe transcriptie van een Nederlandse voetbalpodcast, met per regel
+een generiek spreker-label (SPEAKER_00, SPEAKER_01, etc.) gevolgd door wat die persoon zei.
+Deze labels zijn automatisch gegenereerd en komen niet overeen met de echte namen.
+
+Context over deze podcast — bekende, mogelijke sprekers:
+{feed_context or 'Geen specifieke context beschikbaar.'}
+
+Jouw taak:
+1. Herleid, op basis van zelfintroducties, aansprekingen door anderen, en de context hierboven, welke
+   echte naam bij elk SPEAKER_XX-label hoort. Gebruik ALLEEN namen uit de context hierboven, of "Onbekende spreker"
+   als je het niet zeker kunt afleiden — verzin nooit een naam die niet in de context staat.
+2. Herken reclameblokken (sponsored content, productaanbevelingen zoals "ga naar www...", kortingscodes,
+   "deze aflevering wordt mogelijk gemaakt door...") en laat die volledig weg uit de output.
+3. Geef de output terug als platte tekst, per regel in het formaat "Naam: uitspraak", zonder inleiding,
+   zonder opsomming van wie wie is, gewoon de doorlopende, opgeschoonde transcriptie zelf.
+
+RUWE TRANSCRIPTIE:
+{ruwe_tekst}"""
+
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={apikey}"
+    payload = {"contents": [{"parts": [{"text": prompt}]}]}
+
+    def _aanroep():
+        r = requests.post(url, json=payload, timeout=300)
+        r.raise_for_status()
+        data = r.json()
+        if "error" in data:
+            raise Exception(data["error"])
+        return data["candidates"][0]["content"]["parts"][0]["text"]
+
+    try:
+        return laad_met_retry(_aanroep)
+    except Exception as e:
+        print(f"WAARSCHUWING: verrijking via Gemini mislukt voor {feed_naam} ({e}) — ruwe SPEAKER_XX-labels blijven staan.")
+        return ruwe_tekst
+
 # ===== Drive: uploaden naar Inbox =====
 
 def get_drive_service():
@@ -387,6 +434,9 @@ def main():
             try:
                 laad_met_retry(lambda: download_audio(aflevering["audio_url"], audio_pad))
                 tekst = transcribeer(audio_pad, feed_info.get("context"))
+                if ENABLE_LLM_VERRIJKING:
+                    print(f"[{naam}] transcriptie verrijken (echte namen + reclame filteren)...")
+                    tekst = verrijk_met_llm(tekst, naam, feed_info.get("context"))
                 bestandsnaam = maak_bestandsnaam(naam, aflevering["datum"])
                 upload_naar_drive(drive, tekst, bestandsnaam)
                 print(f"[{naam}] geüpload als {bestandsnaam}")
