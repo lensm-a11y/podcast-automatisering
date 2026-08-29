@@ -112,7 +112,7 @@ MAX_AFLEVERING_LEEFTIJD_DAGEN = 60  # TIJDELIJK ruim gezet voor de eerste testro
 ALLEEN_LAATSTE_AFLEVERING = True    # True = per feed maximaal 1 (de meest recente) nieuwe aflevering per run verwerken
 ENABLE_DIARIZATION = True           # True = sprekers labelen (SPEAKER_00, etc.) via WhisperX+pyannote, trager dan zonder
 ENABLE_LLM_VERRIJKING = True        # True = ruwe SPEAKER_XX-labels omzetten naar echte namen + reclame eruit filteren via Gemini
-GEMINI_MODEL = "gemini-2.5-flash"
+GEMINI_MODEL = "gemini-3.6-flash"  # actuele, stabiele (GA) Gemini-modelnaam — pas aan als Google een nieuwere versie uitbrengt en deze uitfaseert
 SERVICE_ACCOUNT_JSON = "service_account.json"  # alleen gebruikt als fallback bij een Shared Drive/Workspace-account, zie get_drive_service()
 
 import threading
@@ -319,21 +319,32 @@ def verrijk_met_llm(ruwe_tekst, feed_naam, feed_context):
 
     prompt = f"""Je krijgt hieronder een ruwe transcriptie van een Nederlandse voetbalpodcast, met per regel
 een generiek spreker-label (SPEAKER_00, SPEAKER_01, etc.) gevolgd door wat die persoon zei.
-Deze labels zijn automatisch gegenereerd en komen niet overeen met de echte namen.
+Deze labels komen uit automatische stemherkenning, en zijn NIET altijd betrouwbaar — de audio-analyse
+mist regelmatig een sprekerwissel (bijvoorbeeld bij snel doorpratende gasten, vergelijkbare stemmen, of
+door elkaar heen praten). Je taak is dus niet alleen labels vertalen, maar de sprekertoewijzing
+inhoudelijk controleren en waar nodig corrigeren.
 
 Context over deze podcast — bekende, mogelijke sprekers:
 {feed_context or 'Geen specifieke context beschikbaar.'}
 
 Jouw taak:
-1. Herleid, op basis van zelfintroducties, aansprekingen door anderen, en de context hierboven, welke
-   echte naam bij elk SPEAKER_XX-label hoort. Gebruik ALLEEN namen uit de context hierboven, of "Onbekende spreker"
-   als je het niet zeker kunt afleiden — verzin nooit een naam die niet in de context staat.
-2. Herken reclameblokken (sponsored content, productaanbevelingen zoals "ga naar www...", kortingscodes,
+1. Lees de hele transcriptie door en gebruik de INHOUD om te bepalen wie daadwerkelijk aan het woord is
+   per regel — niet alleen het SPEAKER-label. Let op signalen als: iemand die bij naam wordt aangesproken
+   ("Sjoerd, wat denk jij?") gevolgd door een reactie in de ik-vorm, presentators die gasten introduceren,
+   onderwerpswisselingen die bij een specifieke analist horen, en logische gespreksvolgorde (een vraag
+   wordt meestal beantwoord door een ándere spreker dan wie de vraag stelde).
+2. Als de inhoud duidelijk een andere spreker aangeeft dan het ruwe SPEAKER-label suggereert, VOLG DE INHOUD,
+   niet het label — het label is een hulpmiddel, geen waarheid. Corrigeer sprekerwissels die het label heeft
+   gemist (bijvoorbeeld: drie opeenvolgende regels met hetzelfde label, terwijl de inhoud duidelijk laat zien
+   dat er twee verschillende mensen aan het woord zijn).
+3. Gebruik ALLEEN namen uit de context hierboven, of "Onbekende spreker" als je het écht niet kunt afleiden
+   — verzin nooit een naam die niet in de context staat.
+4. Herken reclameblokken (sponsored content, productaanbevelingen zoals "ga naar www...", kortingscodes,
    "deze aflevering wordt mogelijk gemaakt door...") en laat die volledig weg uit de output.
-3. Geef de output terug als platte tekst, per regel in het formaat "Naam: uitspraak", zonder inleiding,
-   zonder opsomming van wie wie is, gewoon de doorlopende, opgeschoonde transcriptie zelf.
+5. Geef de output terug als platte tekst, per regel in het formaat "Naam: uitspraak", zonder inleiding,
+   zonder opsomming van wie wie is, gewoon de doorlopende, opgeschoonde en gecorrigeerde transcriptie zelf.
 
-RUWE TRANSCRIPTIE:
+RUWE TRANSCRIPTIE (SPEAKER-labels kunnen dus fouten bevatten, corrigeer op basis van inhoud):
 {ruwe_tekst}"""
 
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={apikey}"
