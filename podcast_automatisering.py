@@ -109,9 +109,19 @@ WHISPER_BEAM_SIZE = 5                     # verhoogd van 1 naar 5 (standaard-Whi
 WHISPER_VAD_FILTER = True                 # slaat stiltes/muziek/intro's over — vaak een flinke tijdsbesparing bij podcasts
 TIJDELIJKE_AUDIO_MAP = Path("tmp_audio")
 MAX_AFLEVERING_LEEFTIJD_DAGEN = 60  # TIJDELIJK ruim gezet voor de eerste testronde — zet dit terug naar bv. 7 zodra alles werkt
-ALLEEN_LAATSTE_AFLEVERING = True    # True = per feed maximaal 1 (de meest recente) nieuwe aflevering per run verwerken
+ALLEEN_LAATSTE_AFLEVERING = False   # TIJDELIJK uit om de gemiste week (verlopen token) in één keer in te halen — zet terug naar True na de inhaalslag
 ENABLE_DIARIZATION = True           # True = sprekers labelen (SPEAKER_00, etc.) via WhisperX+pyannote, trager dan zonder
 ENABLE_LLM_VERRIJKING = True        # True = ruwe SPEAKER_XX-labels omzetten naar echte namen + reclame eruit filteren via Gemini
+ENABLE_STEMHERKENNING = True        # True = eerst proberen te matchen met referentiestemmen (zie voices/), vóór Gemini's content-gok
+STEM_HERKENNING_DREMPEL = 0.75      # cosine-similarity drempel voor een geaccepteerde match (0-1, hoger = strenger)
+REFERENTIE_STEMMEN = {
+    # Naam exact zoals in de context-lijsten hierboven -> pad naar een kort (10-30s), schoon audiofragment
+    # van uitsluitend die persoon. Zie de losse instructie voor hoe je dit invult.
+    "Wytse van der Goot": "voices/wytse_van_der_goot.wav",
+    "Johan Derksen": "voices/johan_derksen.wav",
+    "Wilfred Genee": "voices/wilfred_genee.wav",
+    "Wim Kieft": "voices/wim_kieft.wav",
+}
 GEMINI_MODEL = "gemini-3.6-flash"  # actuele, stabiele (GA) Gemini-modelnaam — pas aan als Google een nieuwere versie uitbrengt en deze uitfaseert
 SERVICE_ACCOUNT_JSON = "service_account.json"  # alleen gebruikt als fallback bij een Shared Drive/Workspace-account, zie get_drive_service()
 
@@ -300,13 +310,107 @@ def transcribeer_met_sprekers(audio_pad, feed_context=None):
         diarize_segments = laad_met_retry(lambda: _diarize_model(audio))
     result = whisperx.assign_word_speakers(diarize_segments, result)
 
+    stem_matches = {}
+    if ENABLE_STEMHERKENNING:
+        print("Stemherkenning uitvoeren op basis van referentiestemmen...")
+        try:
+            stem_matches = herken_sprekers_via_stem(audio, 16000, result["segments"], hf_token)
+        except Exception as e:
+            print(f"WAARSCHUWING: stemherkenning mislukt ({e}), verder zonder.")
+
     regels = []
     for seg in result["segments"]:
-        spreker = seg.get("speaker", "Onbekende spreker")
+        ruw_label = seg.get("speaker", "Onbekende spreker")
+        spreker = stem_matches.get(ruw_label, ruw_label)  # herkende naam indien beschikbaar, anders het ruwe label
         tekst = seg.get("text", "").strip()
         if tekst:
             regels.append(f"{spreker}: {tekst}")
     return "\n".join(regels)
+
+# ===== Stemherkenning: raw SPEAKER_XX-clusters matchen aan bekende referentiestemmen =====
+
+_stem_inference = None
+_referentie_embeddings = None
+
+def laad_stemherkenning(hf_token):
+    global _stem_inference, _referentie_embeddings
+    if _referentie_embeddings is not None:
+        return  # al geladen deze run
+
+    from pyannote.audio import Model, Inference
+    from pathlib import Path as _Path
+
+    print("Referentiestemmen laden voor stemherkenning...")
+    model = Model.from_pretrained("pyannote/embedding", use_auth_token=hf_token)
+    _stem_inference = Inference(model, window="whole")
+
+    _referentie_embeddings = {}
+    for naam, pad in REFERENTIE_STEMMEN.items():
+        if not _Path(pad).exists():
+            print(f"WAARSCHUWING: referentiebestand voor {naam} niet gevonden op '{pad}', wordt overgeslagen bij stemherkenning.")
+            continue
+        try:
+            _referentie_embeddings[naam] = _stem_inference(pad)
+        except Exception as e:
+            print(f"WAARSCHUWING: kon referentiestem voor {naam} niet inladen ({e}), wordt overgeslagen.")
+
+def _cosine_similarity(a, b):
+    import numpy as np
+    a, b = np.asarray(a).flatten(), np.asarray(b).flatten()
+    return float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b) + 1e-8))
+
+def herken_sprekers_via_stem(audio, samplerate, whisperx_segments, hf_token):
+    """Geeft een dict {ruw_SPEAKER_label: herkende_naam} terug voor clusters die met
+    voldoende zekerheid matchen met een referentiestem. Niet-gematchte labels blijven
+    achterwege in de dict (dan valt de Gemini-stap terug op content-gebaseerd gokken)."""
+    import numpy as np
+
+    if not REFERENTIE_STEMMEN:
+        return {}
+
+    try:
+        laad_stemherkenning(hf_token)
+    except Exception as e:
+        print(f"WAARSCHUWING: stemherkenningsmodel kon niet geladen worden ({e}), deze stap wordt overgeslagen.")
+        return {}
+
+    if not _referentie_embeddings:
+        return {}  # geen enkel referentiebestand gevonden, niets te matchen
+
+    # Per raw label tot ~5 seconden audio verzamelen om een representatieve embedding te maken
+    per_label_audio = {}
+    for seg in whisperx_segments:
+        label = seg.get("speaker")
+        if not label:
+            continue
+        huidige_duur = per_label_audio.get(label, np.array([])).shape[0] / samplerate if label in per_label_audio else 0
+        if huidige_duur >= 5.0:
+            continue  # genoeg audio voor dit label, andere labels nog aanvullen
+        start_sample = int(seg["start"] * samplerate)
+        eind_sample = int(seg["end"] * samplerate)
+        stukje = audio[start_sample:eind_sample]
+        per_label_audio[label] = np.concatenate([per_label_audio.get(label, np.array([], dtype=audio.dtype)), stukje])
+
+    resultaat = {}
+    for label, audiodata in per_label_audio.items():
+        if audiodata.shape[0] < samplerate * 1.0:
+            continue  # te weinig audio (< 1s) voor een betrouwbare embedding
+        try:
+            embedding = _stem_inference({"waveform": np.expand_dims(audiodata, 0), "sample_rate": samplerate})
+        except Exception:
+            continue
+
+        beste_naam, beste_score = None, 0.0
+        for naam, ref_embedding in _referentie_embeddings.items():
+            score = _cosine_similarity(embedding, ref_embedding)
+            if score > beste_score:
+                beste_naam, beste_score = naam, score
+
+        if beste_naam and beste_score >= STEM_HERKENNING_DREMPEL:
+            print(f"Stemherkenning: {label} -> {beste_naam} (score {beste_score:.2f})")
+            resultaat[label] = beste_naam
+
+    return resultaat
 
 # ===== Verrijking: SPEAKER_XX -> echte namen, en reclame eruit filteren (via Gemini) =====
 
@@ -317,34 +421,31 @@ def verrijk_met_llm(ruwe_tekst, feed_naam, feed_context):
         print(f"WAARSCHUWING: GEMINI_API_KEY ontbreekt, verrijking overgeslagen voor {feed_naam} (ruwe SPEAKER_XX-labels blijven staan).")
         return ruwe_tekst
 
-    prompt = f"""Je krijgt hieronder een ruwe transcriptie van een Nederlandse voetbalpodcast, met per regel
-een generiek spreker-label (SPEAKER_00, SPEAKER_01, etc.) gevolgd door wat die persoon zei.
-Deze labels komen uit automatische stemherkenning, en zijn NIET altijd betrouwbaar — de audio-analyse
-mist regelmatig een sprekerwissel (bijvoorbeeld bij snel doorpratende gasten, vergelijkbare stemmen, of
-door elkaar heen praten). Je taak is dus niet alleen labels vertalen, maar de sprekertoewijzing
-inhoudelijk controleren en waar nodig corrigeren.
+    prompt = f"""Je krijgt hieronder een transcriptie van een Nederlandse voetbalpodcast, met per regel
+een sprekeraanduiding gevolgd door wat die persoon zei.
+
+Sommige regels hebben al een ECHTE, met stemherkenning bevestigde naam (bijvoorbeeld "Wim Kieft: ...") —
+die zijn al betrouwbaar vastgesteld op basis van de stem zelf en moet je NIET wijzigen. Andere regels
+hebben nog een generiek label (SPEAKER_00, SPEAKER_01, etc.) — deze zijn NIET betrouwbaar en moeten
+door jou worden herleid of gecorrigeerd op basis van de inhoud.
 
 Context over deze podcast — bekende, mogelijke sprekers:
 {feed_context or 'Geen specifieke context beschikbaar.'}
 
 Jouw taak:
-1. Lees de hele transcriptie door en gebruik de INHOUD om te bepalen wie daadwerkelijk aan het woord is
-   per regel — niet alleen het SPEAKER-label. Let op signalen als: iemand die bij naam wordt aangesproken
-   ("Sjoerd, wat denk jij?") gevolgd door een reactie in de ik-vorm, presentators die gasten introduceren,
-   onderwerpswisselingen die bij een specifieke analist horen, en logische gespreksvolgorde (een vraag
-   wordt meestal beantwoord door een ándere spreker dan wie de vraag stelde).
-2. Als de inhoud duidelijk een andere spreker aangeeft dan het ruwe SPEAKER-label suggereert, VOLG DE INHOUD,
-   niet het label — het label is een hulpmiddel, geen waarheid. Corrigeer sprekerwissels die het label heeft
-   gemist (bijvoorbeeld: drie opeenvolgende regels met hetzelfde label, terwijl de inhoud duidelijk laat zien
-   dat er twee verschillende mensen aan het woord zijn).
-3. Gebruik ALLEEN namen uit de context hierboven, of "Onbekende spreker" als je het écht niet kunt afleiden
-   — verzin nooit een naam die niet in de context staat.
+1. Laat regels met een al bevestigde, herkenbare naam (geen SPEAKER_XX-patroon) exact zoals ze zijn.
+2. Voor regels met een SPEAKER_XX-label: gebruik de INHOUD om te bepalen wie daadwerkelijk aan het woord is
+   — let op aansprekingen bij naam, ik-vorm-reacties op vragen, en logische gespreksvolgorde. Als een
+   SPEAKER_XX-label inhoudelijk duidelijk bij een spreker hoort die elders in de tekst al met een bevestigde
+   naam voorkomt, gebruik dan die naam.
+3. Gebruik voor nieuw toe te kennen namen ALLEEN namen uit de context hierboven, of "Onbekende spreker"
+   als je het écht niet kunt afleiden — verzin nooit een naam die niet in de context staat.
 4. Herken reclameblokken (sponsored content, productaanbevelingen zoals "ga naar www...", kortingscodes,
    "deze aflevering wordt mogelijk gemaakt door...") en laat die volledig weg uit de output.
 5. Geef de output terug als platte tekst, per regel in het formaat "Naam: uitspraak", zonder inleiding,
    zonder opsomming van wie wie is, gewoon de doorlopende, opgeschoonde en gecorrigeerde transcriptie zelf.
 
-RUWE TRANSCRIPTIE (SPEAKER-labels kunnen dus fouten bevatten, corrigeer op basis van inhoud):
+TRANSCRIPTIE:
 {ruwe_tekst}"""
 
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={apikey}"
