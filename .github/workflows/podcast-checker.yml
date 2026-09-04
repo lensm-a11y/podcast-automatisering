@@ -7,6 +7,11 @@ on:
   schedule:
     - cron: '0 4 * * *'   # 04:00 UTC = 06:00 Nederlandse tijd (zomertijd, CEST) — draait elke dag. Bij overgang naar wintertijd (eind oktober): pas aan naar '0 5 * * *' (05:00 UTC = 06:00 CET)
   workflow_dispatch:        # hiermee kun je 'm ook handmatig starten vanuit de Actions-tab
+    inputs:
+      alle_podcasts:
+        description: "Alle podcasts forceren, ongeacht het dagschema (handig na een storing/gemiste periode)"
+        type: boolean
+        default: false
 
 jobs:
   check-podcasts:
@@ -32,6 +37,11 @@ jobs:
           DAG=$(date -u +%u)   # 1=maandag, 2=dinsdag, 3=woensdag, 4=donderdag, 5=vrijdag, 6=zaterdag, 7=zondag
           FEED="${{ matrix.feed }}"
           DOORGAAN=false
+
+          if [ "${{ inputs.alle_podcasts }}" = "true" ]; then
+            DOORGAAN=true
+            echo "Handmatig geforceerd: dagschema wordt genegeerd voor deze run."
+          fi
 
           # Weekschema:
           # Maandag:    NOS, AD
