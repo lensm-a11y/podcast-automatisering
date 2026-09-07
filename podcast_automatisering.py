@@ -109,7 +109,7 @@ WHISPER_BEAM_SIZE = 5                     # verhoogd van 1 naar 5 (standaard-Whi
 WHISPER_VAD_FILTER = True                 # slaat stiltes/muziek/intro's over — vaak een flinke tijdsbesparing bij podcasts
 TIJDELIJKE_AUDIO_MAP = Path("tmp_audio")
 MAX_AFLEVERING_LEEFTIJD_DAGEN = 60  # TIJDELIJK ruim gezet voor de eerste testronde — zet dit terug naar bv. 7 zodra alles werkt
-ALLEEN_LAATSTE_AFLEVERING = False   # TIJDELIJK uit om de gemiste week (verlopen token) in één keer in te halen — zet terug naar True na de inhaalslag
+ALLEEN_LAATSTE_AFLEVERING = True    # True = per feed maximaal 1 (de meest recente, nog niet verwerkte) aflevering per run — voorkomt de timeout die bij AD/NOS/KickOff optrad
 ENABLE_DIARIZATION = True           # True = sprekers labelen (SPEAKER_00, etc.) via WhisperX+pyannote, trager dan zonder
 ENABLE_LLM_VERRIJKING = True        # True = ruwe SPEAKER_XX-labels omzetten naar echte namen + reclame eruit filteren via Gemini
 ENABLE_STEMHERKENNING = True        # True = eerst proberen te matchen met referentiestemmen (zie voices/), vóór Gemini's content-gok
