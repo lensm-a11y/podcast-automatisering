@@ -4,6 +4,8 @@ Podcast-automatisering voor het claims-project
 Controleert een lijst RSS-feeds op nieuwe afleveringen, downloadt de audio,
 transcribeert met lokale Whisper, en uploadt het transcript automatisch
 naar de Inbox-map in Google Drive (waar het Apps Script het verder oppakt).
+Daarnaast wordt tegelijk een ongewijzigd duplicaat naar de Ruw-map gezet,
+zodat Stap 2 later handmatige correcties in Inbox kan detecteren.
 
 Eenmalige opzet die dit script vereist (zie toelichting):
 1. Google Cloud service-account met Drive API aan, JSON-sleutel gedownload.
@@ -92,6 +94,7 @@ FEEDS = [
 ]
 
 INBOX_FOLDER_ID = "1Sqia5kivNsQgxXbNzBHLNMzE3RJMxwB0"   # ID uit de Drive-URL van je Inbox-map
+RUW_FOLDER_ID = "16C4ZID6QK8fC-YMyWLBwKVl7VDVGoDnm"      # ID van de Ruw-map — ongewijzigde originelen, voor correctiedetectie in Stap 2
 WHISPER_MODEL_GROOTTE = "large-v3"        # zwaarste, meest nauwkeurige model — kwaliteit boven snelheid
 WHISPER_INITIAL_PROMPT = (
     "Dit is een Nederlandstalige voetbalpodcast. Er wordt gesproken over wedstrijden, "
@@ -465,7 +468,7 @@ TRANSCRIPTIE:
         print(f"WAARSCHUWING: verrijking via Gemini mislukt voor {feed_naam} ({e}) — ruwe SPEAKER_XX-labels blijven staan.")
         return ruwe_tekst
 
-# ===== Drive: uploaden naar Inbox =====
+# ===== Drive: uploaden naar Inbox én Ruw =====
 
 def get_drive_service():
     import os
@@ -500,10 +503,24 @@ def get_drive_service():
 def upload_naar_drive(service, tekst, bestandsnaam):
     tijdelijk_pad = TIJDELIJKE_AUDIO_MAP / bestandsnaam
     tijdelijk_pad.write_text(tekst, encoding="utf-8")
-
-    metadata = {"name": bestandsnaam, "parents": [INBOX_FOLDER_ID]}
     media = MediaFileUpload(str(tijdelijk_pad), mimetype="text/plain")
-    bestand = service.files().create(body=metadata, media_body=media, fields="id").execute()
+
+    # 1. Origineel, ongewijzigd exemplaar naar Ruw — dit gebeurt EERST en is de
+    #    referentie waar Stap 2 latere handmatige correcties in Inbox tegen aflegt.
+    metadata_ruw = {"name": bestandsnaam, "parents": [RUW_FOLDER_ID]}
+    try:
+        service.files().create(body=metadata_ruw, media_body=media, fields="id").execute()
+    except Exception as e:
+        # Een mislukte Ruw-kopie mag de Inbox-upload niet blokkeren, maar moet wel
+        # zichtbaar zijn in de run-logs -- anders ontbreekt de referentie straks
+        # stilzwijgend in Stap 2's correctiedetectie.
+        print(f"WAARSCHUWING: kopie naar Ruw-map mislukt voor {bestandsnaam} ({e}) -- "
+              f"correctiedetectie in Stap 2 zal dit bestand overslaan.")
+
+    # 2. Werkexemplaar naar Inbox -- dit is waar handmatige correcties in worden aangebracht.
+    metadata_inbox = {"name": bestandsnaam, "parents": [INBOX_FOLDER_ID]}
+    bestand = service.files().create(body=metadata_inbox, media_body=media, fields="id").execute()
+
     tijdelijk_pad.unlink()
     return bestand.get("id")
 
@@ -551,7 +568,7 @@ def main():
                     tekst = verrijk_met_llm(tekst, naam, feed_info.get("context"))
                 bestandsnaam = maak_bestandsnaam(naam, aflevering["datum"])
                 upload_naar_drive(drive, tekst, bestandsnaam)
-                print(f"[{naam}] geüpload als {bestandsnaam}")
+                print(f"[{naam}] geüpload als {bestandsnaam} (Inbox + Ruw)")
 
                 al_verwerkt.append(aflevering["id"])
                 sla_state_op(state_bestand, al_verwerkt)  # meteen opslaan, niet pas aan het eind
